@@ -155,3 +155,9 @@ Deep sleep with the modem fully off dominates the budget. At a 5-min cadence exp
 ## Production deployment (Traefik)
 
 Deployed at `root@192.168.201.50:/opt/freezermon` (host "FyretApp") using `infra/docker-compose.traefik.yml` — Grafana published as `https://freezer.shitshow.it`, MQTT as TLS on `mqtt.shitshow.it:8883` (Traefik `mqtts` entrypoint terminates TLS; certs via Let's Encrypt once DNS exists). Secrets live in `/opt/freezermon/.env` on the server. Device config for production: `MQTT_HOST "mqtt.shitshow.it"`, `MQTT_PORT 8883`, flash env `t-a7608-tls`.
+
+## License
+
+[MIT](LICENSE) © 2026 Peter Hamborg Haugaard.
+
+Third-party components keep their own licenses — see [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). Note the firmware links **TinyGSM (LGPL-3.0)** and the **Arduino-ESP32 core (LGPL-2.1)**: weak copyleft, satisfied here because the full source is public and rebuildable.
