@@ -3,7 +3,9 @@
 #pragma once
 
 // ---- Identity ----
-#define DEVICE_ID            "cooler-01"        // unique per unit, used in MQTT topics
+#define DEVICE_ID            "cooler-01"        // SEED default only — the live name lives in NVS and is
+                                                //   set per-unit at runtime via the /setname console (survives OTA).
+                                                //   Leave "" to auto-derive a unique cooler-<chipid> on first boot.
 
 // ---- Cellular ----
 #define APN                  "internet"          // Lebara DK: "internet" (verified live)

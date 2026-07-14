@@ -59,7 +59,7 @@ pio device monitor                             # watch the first cycle
 
 | Setting | What to put |
 |---|---|
-| `DEVICE_ID` | unique id per unit (used in MQTT topics) |
+| `DEVICE_ID` | **seed** default name only — the live name is stored in NVS and set per-unit at runtime via the `/setname` console (survives OTA). One firmware image serves a whole fleet; leave `""` to auto-derive a unique `cooler-<chipid>` on first boot. |
 | `APN` (+ `GPRS_USER`/`GPRS_PASS`, `SIM_PIN`) | from your SIM carrier — MVNOs often need user/pass |
 | `MQTT_HOST` / `MQTT_HOST_IP` / `MQTT_USER` / `MQTT_PASS` | your broker + the credentials you created in `mosquitto_passwd` |
 | `OTA_MANIFEST_URL` | your fw host + the `OTA_PATH_TOKEN` from the server `.env` |
@@ -115,7 +115,9 @@ The device broadcasts its own WiFi access point — `freezermon-<DEVICE_ID>`, pa
 - **On external power**: console is always available.
 - **On battery timer/door wakes**: WiFi stays off — zero power cost in normal operation.
 
-Connect to the AP, then: `http://192.168.4.1/status` (live readings + state, JSON), `http://192.168.4.1/log` (recent event log: boot reason, LTE attach attempts, MQTT results, GPS, sleep decisions), and `http://192.168.4.1/sms` (SMS inbox — read SIM activation/confirmation texts without a phone). WiFi is never used for telemetry — LTE remains the only transport.
+Connect to the AP, then: `http://192.168.4.1/status` (live readings + state, JSON), `http://192.168.4.1/log` (recent event log: boot reason, LTE attach attempts, MQTT results, GPS, sleep decisions), `http://192.168.4.1/sms` (SMS inbox — read SIM activation/confirmation texts without a phone), and `http://192.168.4.1/setname` (name this unit). WiFi is never used for telemetry — LTE remains the only transport.
+
+**Naming a unit.** `/setname` writes the device name to NVS, which is what drives the MQTT topics (`freezer/<name>/…`) and the InfluxDB `device` tag Grafana filters on. Because NVS survives OTA (only the app partition is rewritten), the name sticks across updates — so the deployment workflow for a fleet is: flash the *same* image to every unit, then give each one a unique name here. Valid names are lowercase letters, digits, and hyphens (1–30 chars); setting one reboots the unit so every topic re-derives cleanly.
 
 ### OTA updates
 

@@ -25,12 +25,13 @@
 #include <time.h>
 #include <WiFi.h>
 #include <WebServer.h>
+#include <Preferences.h>         // NVS-backed device name (survives OTA; set via /setname)
 #include <Update.h>
 #include "mbedtls/md.h"          // streaming SHA-256 (version-stable md_* API)
 #include "mbedtls/pk.h"          // RSA-2048 signature verify
 #include "ota_pubkey.h"          // OTA_PUBKEY_PEM — image-signing public key
 
-#define FW_VERSION "2.53"
+#define FW_VERSION "2.54"
 
 #define SerialMon Serial
 #define SerialAT  Serial1
@@ -150,6 +151,12 @@ WebServer debugServer(80);
 bool debugApActive = false;
 volatile bool modemBusy = false;   // main thread owns the modem UART while set
 
+// Runtime device identity. Resolved once per boot from NVS (survives OTA, since
+// OTA only rewrites the app partition) so ONE firmware image can serve a whole
+// fleet — each unit is named independently via the /setname console endpoint.
+// DEVICE_ID in config.h is only the seed default for an un-provisioned unit.
+char deviceId[32] = "cooler-01";   // safe placeholder until resolveDeviceId() runs
+
 #define LOG_RING 96      // holds a full multi-chunk OTA trace in /log
 static String  logRing[LOG_RING];
 static uint8_t logHead = 0, logCount = 0;
@@ -165,6 +172,57 @@ static void logLine(const char *fmt, ...) {
   logRing[logHead] = buf;
   logHead = (logHead + 1) % LOG_RING;
   if (logCount < LOG_RING) logCount++;
+}
+
+// ---------- device identity (NVS-backed) ----------
+// A valid name is what ends up in MQTT topics and the InfluxDB `device` tag, so
+// keep it to the same charset those tolerate: lowercase letters, digits, hyphen.
+static bool deviceNameValid(const char *n) {
+  size_t len = strlen(n);
+  if (len < 1 || len > 30) return false;
+  for (size_t i = 0; i < len; i++) {
+    char c = n[i];
+    if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-')) return false;
+  }
+  return true;
+}
+
+// Resolve deviceId once at boot: stored NVS name wins; if unset (fresh unit or
+// first boot after this firmware), seed it — from the compile-time DEVICE_ID if
+// one is given, else a unique-per-chip default so two un-named units never
+// collide on the same MQTT topic. Seeding writes NVS once, so it's stable after.
+static void resolveDeviceId() {
+  Preferences prefs;
+  prefs.begin("freezermon", true);                 // read-only
+  String stored = prefs.getString("devid", "");
+  prefs.end();
+  if (stored.length() > 0 && deviceNameValid(stored.c_str())) {
+    strlcpy(deviceId, stored.c_str(), sizeof(deviceId));
+    return;
+  }
+  char seed[32];
+  if (strlen(DEVICE_ID) > 0) {                      // explicit name compiled in
+    strlcpy(seed, DEVICE_ID, sizeof(seed));
+  } else {                                          // derive a unique default
+    uint64_t mac = ESP.getEfuseMac();
+    snprintf(seed, sizeof(seed), "cooler-%06x", (uint32_t)(mac & 0xFFFFFF));
+  }
+  prefs.begin("freezermon", false);
+  prefs.putString("devid", seed);
+  prefs.end();
+  strlcpy(deviceId, seed, sizeof(deviceId));
+  logLine("[id] seeded device name = %s", deviceId);
+}
+
+// Persist a new name to NVS. Caller reboots so every MQTT topic / client id /
+// payload tag re-derives cleanly from the new value.
+static bool persistDeviceId(const char *name) {
+  if (!deviceNameValid(name)) return false;
+  Preferences prefs;
+  prefs.begin("freezermon", false);
+  prefs.putString("devid", name);
+  prefs.end();
+  return true;
 }
 
 // ---------- helpers ----------
@@ -331,7 +389,7 @@ static portMUX_TYPE flashMux = portMUX_INITIALIZER_UNLOCKED;
 
 static void startDebugAp() {
   char ssid[48];
-  snprintf(ssid, sizeof(ssid), "freezermon-%s", DEVICE_ID);
+  snprintf(ssid, sizeof(ssid), "freezermon-%s", deviceId);
   WiFi.mode(WIFI_AP);
   WiFi.softAP(ssid, DEBUG_AP_PASSWORD);
 
@@ -343,6 +401,7 @@ static void startDebugAp() {
       "  /lte     modem/network status (registration, band, signal, IP, time)\n"
       "  /gps     GNSS debug (satellites, fix, GPS time)\n"
       "  /sms     SMS inbox (SIM activation texts etc.)\n"
+      "  /setname set this unit's device name (stored in NVS, survives OTA)\n"
       "  /update  OTA firmware upload (browser form)\n");
   });
   debugServer.on("/status", []() {
@@ -350,7 +409,7 @@ static void startDebugAp() {
     Sample s;
     readSensors(s);
     JsonDocument doc;
-    doc["device"]    = DEVICE_ID;
+    doc["device"]    = deviceId;
     doc["fw"]        = FW_VERSION;
     doc["boot"]      = bootCount;
     doc["powered"]   = poweredSession;
@@ -498,6 +557,30 @@ static void startDebugAp() {
     res.replace("\r", "");
     debugServer.send(200, "text/plain",
                      res.length() > 4 ? res : "no SMS stored\n");
+  });
+
+  // Rename this unit from the field console. The name is stored in NVS (survives
+  // OTA) and drives the MQTT topics + the InfluxDB `device` tag, so one firmware
+  // image serves a fleet — flash, then name each unit here. Reboots to re-derive.
+  debugServer.on("/setname", []() {
+    String name = debugServer.arg("name");
+    if (name.length() == 0) {
+      debugServer.send(200, "text/html",
+        "<h3>Device name</h3>current: <b>" + String(deviceId) + "</b>"
+        "<form method='GET' action='/setname'>"
+        "new name: <input name='name' required> "
+        "<input type='submit' value='Set + reboot'></form>"
+        "<small>lowercase letters, digits, hyphen; 1-30 chars. "
+        "Changes the MQTT topics and the Grafana device tag.</small>");
+      return;
+    }
+    if (!persistDeviceId(name.c_str())) {
+      debugServer.send(400, "text/plain", "invalid name - use [a-z0-9-], 1-30 chars\n");
+      return;
+    }
+    debugServer.send(200, "text/plain", "renamed to " + name + " - rebooting\n");
+    delay(400);
+    ESP.restart();
   });
 
   // OTA over the debug AP: upload a new firmware.bin from any browser at
@@ -1115,7 +1198,7 @@ static bool publishSample(const Sample &s, uint32_t nowEpoch, bool buffered,
   doc["fw"]        = FW_VERSION;      // fleet version tracking + OTA confirmation
 
   char topic[64], payload[384];
-  snprintf(topic, sizeof(topic), "freezer/%s/telemetry", DEVICE_ID);
+  snprintf(topic, sizeof(topic), "freezer/%s/telemetry", deviceId);
   size_t n = serializeJson(doc, payload, sizeof(payload));
   // live sample retained (last-known state on broker); backfill not retained
   return mqtt.publish(topic, (const uint8_t *)payload, n, !buffered);
@@ -1128,7 +1211,7 @@ static void publishAlert(const Sample &s, uint32_t nowEpoch, const char *kind) {
   if (!isnan(s.tCab)) doc["t_cab"] = serialized(String(s.tCab, 2));
   doc["vbat_mv"] = s.vbatMv;
   char topic[64], payload[256];
-  snprintf(topic, sizeof(topic), "freezer/%s/alert", DEVICE_ID);
+  snprintf(topic, sizeof(topic), "freezer/%s/alert", deviceId);
   size_t n = serializeJson(doc, payload, sizeof(payload));
   mqtt.publish(topic, (const uint8_t *)payload, n, false);
 }
@@ -1190,6 +1273,7 @@ void setup() {
   awakeStart = millis();
   bootCount++;
   SerialMon.begin(115200);
+  resolveDeviceId();     // NVS -> deviceId, before the AP SSID / MQTT topics use it
 
   // silicon-enforced sleep guarantee: if any modem call wedges past the awake
   // budget, the task WDT resets the chip instead of draining the battery
@@ -1209,7 +1293,7 @@ void setup() {
       rr == ESP_RST_PANIC     ? "PANIC"     : rr == ESP_RST_TASK_WDT ? "TASK_WDT" :
       rr == ESP_RST_INT_WDT   ? "INT_WDT"   : rr == ESP_RST_DEEPSLEEP ? "deepsleep" :
       rr == ESP_RST_SW        ? "sw"        : "other";
-  logLine("[boot] #%lu fw=%s wake=%s reset=%s", bootCount, FW_VERSION, wakeReason, resetStr);
+  logLine("[boot] #%lu fw=%s id=%s wake=%s reset=%s", bootCount, FW_VERSION, deviceId, wakeReason, resetStr);
 
   // cold boot = installer likely present -> bring up the field-debug AP
   if (coldBoot) startDebugAp();
@@ -1240,7 +1324,7 @@ void setup() {
       mqtt.setKeepAlive(180);      // OTA downloads run minutes with no mqtt.loop() — don't let the broker drop us mid-flash
       mqtt.setCallback(mqttCallback);
       char clientId[48];
-      snprintf(clientId, sizeof(clientId), "freezermon-%s", DEVICE_ID);
+      snprintf(clientId, sizeof(clientId), "freezermon-%s", deviceId);
       // Retry the connect — the A76XX TLS/CCH stack occasionally drops a first
       // CCHOPEN. Use the hostname (matches the cert SAN, valid SNI, resolved
       // via the network-provided DNS); the IP is only a last-resort fallback,
@@ -1274,7 +1358,7 @@ void setup() {
 
         // OTA check: the retained cmd (if any) arrives within a moment of subscribing
         char cmdTopic[64];
-        snprintf(cmdTopic, sizeof(cmdTopic), "freezer/%s/cmd", DEVICE_ID);
+        snprintf(cmdTopic, sizeof(cmdTopic), "freezer/%s/cmd", deviceId);
         mqtt.subscribe(cmdTopic);
         uint32_t tCmd = millis();
         while (millis() - tCmd < 3000UL && !otaPending) { mqtt.loop(); delay(20); }
@@ -1359,10 +1443,10 @@ void loop() {
     checkOnlineUpdate();                                // drops the MQTT session (shared client)
     if (!otaPending) {                                  // no update -> restore it in place
       char clientId[48];
-      snprintf(clientId, sizeof(clientId), "freezermon-%s", DEVICE_ID);
+      snprintf(clientId, sizeof(clientId), "freezermon-%s", deviceId);
       if (mqtt.connect(clientId, MQTT_USER, MQTT_PASS)) {
         char cmdTopic[64];
-        snprintf(cmdTopic, sizeof(cmdTopic), "freezer/%s/cmd", DEVICE_ID);
+        snprintf(cmdTopic, sizeof(cmdTopic), "freezer/%s/cmd", deviceId);
         mqtt.subscribe(cmdTopic);
       } else {
         goToSleep(REPORT_INTERVAL_FAST_S);              // recover via a fresh cycle
@@ -1399,11 +1483,11 @@ void loop() {
     modemPowerOn();                                     // true supply cut clears GNSS
     if (!modemConnect()) { goToSleep(REPORT_INTERVAL_FAST_S); }  // couldn't recover -> battery-style cycle
     char clientId[48];
-    snprintf(clientId, sizeof(clientId), "freezermon-%s", DEVICE_ID);
+    snprintf(clientId, sizeof(clientId), "freezermon-%s", deviceId);
     mqtt.setServer(MQTT_HOST, MQTT_PORT);
     if (mqtt.connect(clientId, MQTT_USER, MQTT_PASS)) {
       char cmdTopic[64];
-      snprintf(cmdTopic, sizeof(cmdTopic), "freezer/%s/cmd", DEVICE_ID);
+      snprintf(cmdTopic, sizeof(cmdTopic), "freezer/%s/cmd", deviceId);
       mqtt.subscribe(cmdTopic);
     } else {
       goToSleep(REPORT_INTERVAL_FAST_S);
