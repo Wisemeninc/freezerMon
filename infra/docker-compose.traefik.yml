@@ -12,7 +12,7 @@ services:
     networks: [default, traefik-public]
     labels:
       - "traefik.enable=true"
-      - "traefik.tcp.routers.freezermqtt.rule=HostSNI(`mqtt.shitshow.it`)"
+      - "traefik.tcp.routers.freezermqtt.rule=HostSNI(`mqtt.example.com`)"
       - "traefik.tcp.routers.freezermqtt.entrypoints=mqtts"
       - "traefik.tcp.routers.freezermqtt.tls=true"
       - "traefik.tcp.routers.freezermqtt.tls.certresolver=letsencrypt"
@@ -40,7 +40,7 @@ services:
     networks: [default, traefik-public]
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.freezerota.rule=Host(`freezer.shitshow.it`) && PathPrefix(`/fw/`)"
+      - "traefik.http.routers.freezerota.rule=Host(`freezer.example.com`) && PathPrefix(`/fw/`)"
       - "traefik.http.routers.freezerota.entrypoints=websecure"
       - "traefik.http.routers.freezerota.tls.certresolver=letsencrypt"
       # fw <=1.5 performOta hardcodes :443, so the OTA host must speak the
@@ -49,7 +49,7 @@ services:
       - "traefik.http.routers.freezerota.tls.options=mqttcompat@file"
       # OTA is also reachable on the MQTT hostname: the device's carrier DNS
       # demonstrably resolves it, ruling DNS in/out for OTA connect failures.
-      - "traefik.http.routers.freezerota2.rule=Host(`mqtt.shitshow.it`) && PathPrefix(`/fw/`)"
+      - "traefik.http.routers.freezerota2.rule=Host(`mqtt.example.com`) && PathPrefix(`/fw/`)"
       - "traefik.http.routers.freezerota2.entrypoints=websecure"
       - "traefik.http.routers.freezerota2.tls.certresolver=letsencrypt"
       - "traefik.http.routers.freezerota2.tls.options=mqttcompat@file"
@@ -61,7 +61,7 @@ services:
       # (entryPoints.web.http.redirections.entryPoint.priority: 10); this router's
       # priority must exceed that. Other apps have no :80 routers, so they still
       # redirect. Browsers still get HTTPS via freezerota/freezerota2.
-      - "traefik.http.routers.freezerotahttp.rule=Host(`freezer.shitshow.it`) && PathPrefix(`/fw/`)"
+      - "traefik.http.routers.freezerotahttp.rule=Host(`freezer.example.com`) && PathPrefix(`/fw/`)"
       - "traefik.http.routers.freezerotahttp.entrypoints=web"
       - "traefik.http.routers.freezerotahttp.service=freezerota"
       - "traefik.http.routers.freezerotahttp.priority=100000"
@@ -104,7 +104,7 @@ services:
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set in .env}
       GF_USERS_ALLOW_SIGN_UP: "false"
       GF_USERS_AUTO_ASSIGN_ORG_ROLE: "Viewer"
-      GF_SERVER_ROOT_URL: "https://freezer.shitshow.it"
+      GF_SERVER_ROOT_URL: "https://freezer.example.com"
       INFLUX_ORG: ${INFLUX_ORG:-freezermon}
       INFLUX_BUCKET: ${INFLUX_BUCKET:-telemetry}
       INFLUX_TOKEN: ${INFLUX_TOKEN:?set in .env}
@@ -115,7 +115,7 @@ services:
     networks: [default, traefik-public]
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.freezergrafana.rule=Host(`freezer.shitshow.it`)"
+      - "traefik.http.routers.freezergrafana.rule=Host(`freezer.example.com`)"
       - "traefik.http.routers.freezergrafana.entrypoints=websecure"
       - "traefik.http.routers.freezergrafana.tls.certresolver=letsencrypt"
       # browsers still pick the ECDHE-GCM suites from mqttcompat; only the

@@ -159,7 +159,7 @@ Deep sleep with the modem fully off dominates the budget. At a 5-min cadence exp
 
 ## Production deployment (Traefik)
 
-Deployed at `root@192.168.201.50:/opt/freezermon` (host "FyretApp") using `infra/docker-compose.traefik.yml` — Grafana published as `https://freezer.shitshow.it`, MQTT as TLS on `mqtt.shitshow.it:8883` (Traefik `mqtts` entrypoint terminates TLS; certs via Let's Encrypt once DNS exists). Secrets live in `/opt/freezermon/.env` on the server. Device config for production: `MQTT_HOST "mqtt.shitshow.it"`, `MQTT_PORT 8883`, flash env `t-a7608-tls`.
+To run it behind Traefik on a public host, use `infra/docker-compose.traefik.yml` and set **your own** domains in the router rules (the file ships `example.com` placeholders): e.g. one host for Grafana + the OTA `/fw/` path, and one for MQTT-over-TLS on the `mqtts` entrypoint — Traefik terminates TLS, with certs via Let's Encrypt once DNS points at the host. Keep secrets in the server's `.env`. Device config for production: `MQTT_HOST` = your MQTT domain, `MQTT_PORT 8883`, flash env `t-a7608-tls`.
 
 ## License
 

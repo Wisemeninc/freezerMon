@@ -16,8 +16,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash, sign as cryptoSign } from "node:crypto";
 
-const SERVER = process.env.FREEZERMON_SERVER ?? "root@192.168.201.50";
-const HOST = process.env.FREEZERMON_HOST ?? "freezer.shitshow.it";
+const SERVER = process.env.FREEZERMON_SERVER ?? "root@your-server.example.com";
+const HOST = process.env.FREEZERMON_HOST ?? "freezer.example.com";
 const BIN = "firmware/.pio/build/t-a7608-tls/firmware.bin";
 
 const ver = process.argv[2];

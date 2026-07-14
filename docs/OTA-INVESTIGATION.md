@@ -28,7 +28,7 @@ The public proxy container is named **`traefik`** and the OTA backend is
 **`freezermon-ota-1`** (nginx). Tailing a *non-existent* `freezermon-traefik-1`
 returned empty and looked exactly like "the device isn't fetching" — when it was.
 **Watch `docker logs freezermon-ota-1`** for real OTA fetch activity. Also: the
-server's own shell resolves `freezer.shitshow.it` via a hairpin that 404s; test the
+server's own shell resolves `freezer.example.com` via a hairpin that 404s; test the
 public URL from an external host (or the device) instead.
 
 ---
