@@ -1,0 +1,16 @@
+# secrets — never commit
+infra/.env
+firmware/include/config.h
+infra/mosquitto/config/passwd
+infra/mosquitto/config/certs/
+
+# build artifacts
+firmware/.pio/
+.vscode/
+node_modules/
+
+# OTA signing private key — never commit
+infra/keys/
+
+# internal algorithm working notes — not part of the product
+ISA.md

@@ -1,0 +1,116 @@
+# freezerMon provisioned alert rules (Grafana unified alerting, apiVersion 1).
+# Contact points (Telegram/email) are configured in the UI or a separate
+# contactPoints block — see README §Alerting.
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: freezermon
+    folder: FreezerMon
+    interval: 1m
+    rules:
+      - uid: fm-temp-high
+        title: Cabinet temperature high
+        condition: C
+        for: 10m
+        noDataState: NoData
+        execErrState: Error
+        annotations:
+          summary: "Cabinet above alarm threshold on {{ $labels.device }}"
+        data:
+          - refId: A
+            relativeTimeRange: { from: 900, to: 0 }
+            datasourceUid: influxdb
+            model:
+              refId: A
+              query: |
+                from(bucket: "telemetry")
+                  |> range(start: -15m)
+                  |> filter(fn: (r) => r._measurement == "telemetry" and r._field == "t_cab")
+                  |> aggregateWindow(every: 1m, fn: mean, createEmpty: false)
+                  |> group(columns: ["device"])
+          - refId: B
+            relativeTimeRange: { from: 0, to: 0 }
+            datasourceUid: __expr__
+            model: { refId: B, type: reduce, expression: A, reducer: last }
+          - refId: C
+            relativeTimeRange: { from: 0, to: 0 }
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator: { type: gt, params: [-12] }
+
+      - uid: fm-device-stale
+        title: Device offline / no data
+        condition: C
+        for: 15m
+        noDataState: Alerting
+        execErrState: Error
+        annotations:
+          summary: "No telemetry received — unit offline or out of coverage"
+        data:
+          # per-device staleness: seconds since each unit's last report.
+          # A device that vanishes still has a row (from the 24h lookback), so
+          # ONE stale unit in a fleet fires the alert — count()-based checks
+          # only catch the whole fleet going silent.
+          - refId: A
+            relativeTimeRange: { from: 86400, to: 0 }
+            datasourceUid: influxdb
+            model:
+              refId: A
+              query: |
+                from(bucket: "telemetry")
+                  |> range(start: -24h)
+                  |> filter(fn: (r) => r._measurement == "telemetry" and r._field == "t_cab")
+                  |> group(columns: ["device"])
+                  |> last()
+                  |> map(fn: (r) => ({ r with _value: float(v: int(v: now()) - int(v: r._time)) / 1000000000.0 }))
+          - refId: B
+            relativeTimeRange: { from: 0, to: 0 }
+            datasourceUid: __expr__
+            model: { refId: B, type: reduce, expression: A, reducer: last }
+          - refId: C
+            relativeTimeRange: { from: 0, to: 0 }
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator: { type: gt, params: [900] }
+
+      - uid: fm-batt-low
+        title: Battery low
+        condition: C
+        for: 5m
+        noDataState: NoData
+        execErrState: Error
+        annotations:
+          summary: "Battery below 3.4 V on {{ $labels.device }}"
+        data:
+          - refId: A
+            relativeTimeRange: { from: 900, to: 0 }
+            datasourceUid: influxdb
+            model:
+              refId: A
+              query: |
+                from(bucket: "telemetry")
+                  |> range(start: -15m)
+                  |> filter(fn: (r) => r._measurement == "telemetry" and r._field == "vbat_mv")
+                  |> group(columns: ["device"])
+          - refId: B
+            relativeTimeRange: { from: 0, to: 0 }
+            datasourceUid: __expr__
+            model: { refId: B, type: reduce, expression: A, reducer: last }
+          - refId: C
+            relativeTimeRange: { from: 0, to: 0 }
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator: { type: lt, params: [3400] }

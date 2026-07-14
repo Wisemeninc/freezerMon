@@ -1,0 +1,135 @@
+name: freezermon
+
+services:
+  mosquitto:
+    image: eclipse-mosquitto:2.0
+    restart: unless-stopped
+    ports:
+      - "1883:1883"          # LAN/bench only — internet path is TLS 8883 via Traefik
+    volumes:
+      - ./mosquitto/config:/mosquitto/config:ro
+      - mosquitto-data:/mosquitto/data
+    networks: [default, traefik-public]
+    labels:
+      - "traefik.enable=true"
+      - "traefik.tcp.routers.freezermqtt.rule=HostSNI(`mqtt.shitshow.it`)"
+      - "traefik.tcp.routers.freezermqtt.entrypoints=mqtts"
+      - "traefik.tcp.routers.freezermqtt.tls=true"
+      - "traefik.tcp.routers.freezermqtt.tls.certresolver=letsencrypt"
+      # A76XX modem TLS offers only RSA-key-exchange ciphers, which Go >=1.22
+      # (Traefik v3) removed from its defaults. mqttcompat re-enables them for
+      # this entrypoint only — defined in the Traefik host's file provider
+      # (/opt/traefik/dynamic/mqtt-tls.yml) alongside GODEBUG=tlsrsakex=1.
+      - "traefik.tcp.routers.freezermqtt.tls.options=mqttcompat@file"
+      # cellular modem TLS stacks often omit SNI — catch nameless hellos too.
+      # Safe: the mqtts entrypoint serves only this service.
+      - "traefik.tcp.routers.freezermqtt-nosni.rule=HostSNI(`*`)"
+      - "traefik.tcp.routers.freezermqtt-nosni.entrypoints=mqtts"
+      - "traefik.tcp.routers.freezermqtt-nosni.tls=true"
+      - "traefik.tcp.routers.freezermqtt-nosni.tls.options=mqttcompat@file"
+      - "traefik.tcp.services.freezermqtt.loadbalancer.server.port=1883"
+      - "traefik.docker.network=traefik-public"
+
+  # OTA firmware hosting: devices pull /fw/<token>/firmware.bin over TLS.
+  # The random token path is the access control — it lives in .env, not the repo.
+  ota:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    volumes:
+      - ./ota:/usr/share/nginx/html/fw:ro
+    networks: [default, traefik-public]
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.freezerota.rule=Host(`freezer.shitshow.it`) && PathPrefix(`/fw/`)"
+      - "traefik.http.routers.freezerota.entrypoints=websecure"
+      - "traefik.http.routers.freezerota.tls.certresolver=letsencrypt"
+      # fw <=1.5 performOta hardcodes :443, so the OTA host must speak the
+      # modem's RSA-kex ciphers too. Same options as Grafana below — routers
+      # sharing an SNI domain must agree or Traefik falls back to default.
+      - "traefik.http.routers.freezerota.tls.options=mqttcompat@file"
+      # OTA is also reachable on the MQTT hostname: the device's carrier DNS
+      # demonstrably resolves it, ruling DNS in/out for OTA connect failures.
+      - "traefik.http.routers.freezerota2.rule=Host(`mqtt.shitshow.it`) && PathPrefix(`/fw/`)"
+      - "traefik.http.routers.freezerota2.entrypoints=websecure"
+      - "traefik.http.routers.freezerota2.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.freezerota2.tls.options=mqttcompat@file"
+      - "traefik.http.routers.freezerota2.service=freezerota"
+      # Plain-HTTP OTA (fw 2.12+): the device fetches firmware over a plain-TCP
+      # session — the A76XX second-TLS session is unreliable. This router serves
+      # /fw/ on :80 without the HTTPS redirect. It only wins because the Traefik
+      # host's static config lowers the web->websecure redirection priority
+      # (entryPoints.web.http.redirections.entryPoint.priority: 10); this router's
+      # priority must exceed that. Other apps have no :80 routers, so they still
+      # redirect. Browsers still get HTTPS via freezerota/freezerota2.
+      - "traefik.http.routers.freezerotahttp.rule=Host(`freezer.shitshow.it`) && PathPrefix(`/fw/`)"
+      - "traefik.http.routers.freezerotahttp.entrypoints=web"
+      - "traefik.http.routers.freezerotahttp.service=freezerota"
+      - "traefik.http.routers.freezerotahttp.priority=100000"
+      - "traefik.http.services.freezerota.loadbalancer.server.port=80"
+      - "traefik.docker.network=traefik-public"
+
+  influxdb:
+    image: influxdb:2.7
+    restart: unless-stopped
+    environment:
+      DOCKER_INFLUXDB_INIT_MODE: setup
+      DOCKER_INFLUXDB_INIT_USERNAME: admin
+      DOCKER_INFLUXDB_INIT_PASSWORD: ${INFLUX_PASSWORD:?set in .env}
+      DOCKER_INFLUXDB_INIT_ORG: ${INFLUX_ORG:-freezermon}
+      DOCKER_INFLUXDB_INIT_BUCKET: ${INFLUX_BUCKET:-telemetry}
+      DOCKER_INFLUXDB_INIT_RETENTION: 365d
+      DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: ${INFLUX_TOKEN:?set in .env}
+    volumes:
+      - influxdb-data:/var/lib/influxdb2
+
+  telegraf:
+    image: telegraf:1.31
+    restart: unless-stopped
+    depends_on: [mosquitto, influxdb]
+    environment:
+      MQTT_USER: ${MQTT_USER:?set in .env}
+      MQTT_PASSWORD: ${MQTT_PASSWORD:?set in .env}
+      INFLUX_TOKEN: ${INFLUX_TOKEN:?set in .env}
+      INFLUX_ORG: ${INFLUX_ORG:-freezermon}
+      INFLUX_BUCKET: ${INFLUX_BUCKET:-telemetry}
+    volumes:
+      - ./telegraf/telegraf.conf:/etc/telegraf/telegraf.conf:ro
+
+  grafana:
+    image: grafana/grafana:11.1.0
+    restart: unless-stopped
+    depends_on: [influxdb]
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set in .env}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_USERS_AUTO_ASSIGN_ORG_ROLE: "Viewer"
+      GF_SERVER_ROOT_URL: "https://freezer.shitshow.it"
+      INFLUX_ORG: ${INFLUX_ORG:-freezermon}
+      INFLUX_BUCKET: ${INFLUX_BUCKET:-telemetry}
+      INFLUX_TOKEN: ${INFLUX_TOKEN:?set in .env}
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    networks: [default, traefik-public]
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.freezergrafana.rule=Host(`freezer.shitshow.it`)"
+      - "traefik.http.routers.freezergrafana.entrypoints=websecure"
+      - "traefik.http.routers.freezergrafana.tls.certresolver=letsencrypt"
+      # browsers still pick the ECDHE-GCM suites from mqttcompat; only the
+      # modem drops to RSA-kex. Must match freezerota (same SNI domain).
+      - "traefik.http.routers.freezergrafana.tls.options=mqttcompat@file"
+      - "traefik.http.services.freezergrafana.loadbalancer.server.port=3000"
+      - "traefik.docker.network=traefik-public"
+
+volumes:
+  mosquitto-data:
+  influxdb-data:
+  grafana-data:
+
+networks:
+  default:
+  traefik-public:
+    external: true

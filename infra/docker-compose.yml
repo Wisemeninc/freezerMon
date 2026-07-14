@@ -1,0 +1,63 @@
+name: freezermon
+
+services:
+  mosquitto:
+    image: eclipse-mosquitto:2.0
+    restart: unless-stopped
+    ports:
+      - "1883:1883"          # device MQTT (use 8883 + TLS for production, see README)
+    volumes:
+      - ./mosquitto/config:/mosquitto/config:ro
+      - mosquitto-data:/mosquitto/data
+
+  influxdb:
+    image: influxdb:2.7
+    restart: unless-stopped
+    # NOT published to the host — only Telegraf and Grafana reach it internally.
+    environment:
+      DOCKER_INFLUXDB_INIT_MODE: setup
+      DOCKER_INFLUXDB_INIT_USERNAME: admin
+      DOCKER_INFLUXDB_INIT_PASSWORD: ${INFLUX_PASSWORD:?set in .env}
+      DOCKER_INFLUXDB_INIT_ORG: ${INFLUX_ORG:-freezermon}
+      DOCKER_INFLUXDB_INIT_BUCKET: ${INFLUX_BUCKET:-telemetry}
+      DOCKER_INFLUXDB_INIT_RETENTION: 365d
+      DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: ${INFLUX_TOKEN:?set in .env}
+    volumes:
+      - influxdb-data:/var/lib/influxdb2
+
+  telegraf:
+    image: telegraf:1.31
+    restart: unless-stopped
+    depends_on: [mosquitto, influxdb]
+    environment:
+      MQTT_USER: ${MQTT_USER:?set in .env}
+      MQTT_PASSWORD: ${MQTT_PASSWORD:?set in .env}
+      INFLUX_TOKEN: ${INFLUX_TOKEN:?set in .env}
+      INFLUX_ORG: ${INFLUX_ORG:-freezermon}
+      INFLUX_BUCKET: ${INFLUX_BUCKET:-telemetry}
+    volumes:
+      - ./telegraf/telegraf.conf:/etc/telegraf/telegraf.conf:ro
+
+  grafana:
+    image: grafana/grafana:11.1.0
+    restart: unless-stopped
+    depends_on: [influxdb]
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set in .env}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_USERS_AUTO_ASSIGN_ORG_ROLE: "Viewer"   # new users (operator) are read-only
+      INFLUX_ORG: ${INFLUX_ORG:-freezermon}
+      INFLUX_BUCKET: ${INFLUX_BUCKET:-telemetry}
+      INFLUX_TOKEN: ${INFLUX_TOKEN:?set in .env}
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+
+volumes:
+  mosquitto-data:
+  influxdb-data:
+  grafana-data:
