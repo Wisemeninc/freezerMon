@@ -134,6 +134,45 @@ bun infra/scripts/PublishFirmware.ts 2.54 cooler-01
 
 **Over the debug WiFi (fallback)** — `http://192.168.4.1/update`: upload `firmware.bin` **and** `firmware.bin.sig` plus the version; it installs only if the signature verifies. Same dual-slot safety. (This is the trusted channel to establish the *first* signed build on a fleet — see HARDENING.md.)
 
+### OTA download internals (piece-split + verification)
+
+Getting a ~900 KB image through the A7608 reliably was the hard part. The modem's HTTP stack can't hand back a large response in one transfer:
+
+- its HTTP response cache is only ~57 KB, so a single GET larger than that can't be read back in full;
+- it **drops the last ~3072 bytes of every cached response** — it reports the full `Content-Length` in `+HTTPACTION` but only caches `length − 3072`, then `ERROR`s;
+- it won't cache `206 Partial Content`, so ranged GETs come back with a 0-byte body;
+- and streaming over the CCH TCP channel wedges at ~344 KB.
+
+**Solution — split the image into small, overlapping packages.** `PublishFirmware.ts` slices `firmware.bin` server-side:
+
+```
+PIECE   = 32768                 # bytes per piece file (comfortably under the cache)
+OVERLAP = 4096                  # > the 3072-byte tail-drop
+STEP    = PIECE - OVERLAP        # = 28672 real bytes each piece contributes
+piece_i = image[i*STEP : i*STEP + PIECE]        # firmware.bin.000, .001, …
+```
+
+Because pieces advance by `STEP` but span `PIECE`, consecutive pieces **overlap** by `OVERLAP`; the short final piece is zero-padded by `OVERLAP`. The device fetches each piece as a plain `200` GET (fits the cache), then reads only the **deliverable prefix** `want = min(plen − ota_skip, remaining)`. Since `ota_skip = OVERLAP = 4096 > 3072`, that read never reaches the dropped tail, and the prefixes tile the image with **no gap and no overlap in the written bytes** — sum of `want` over all pieces = `ota_size` exactly. (`ota_skip` travels in the retained command, so the overlap is tunable without a reflash.)
+
+Two more device-side rules make it robust on cellular:
+
+- **Read each piece from offset 0 into a RAM buffer, commit only on a clean read.** The modem's offset-resume after a re-fetch returns *wrong bytes*, so a mid-piece resume corrupts the image (byte count still reaches 100 %); we never resume — a failed read re-fetches and re-reads the whole piece from 0, up to `MAX_TRIES = 10`, which absorbs transient blips.
+- Only after a piece reads cleanly is it `Update.write()`-n to the inactive OTA slot.
+
+**Verification — nothing installs unchecked.** While the assembled bytes are written, the device maintains two running digests:
+
+- a streaming **MD5** (`Update.setMD5`) — a cheap corruption pre-check, and
+- a streaming **SHA-256** over `version ‖ 0x00 ‖ image`.
+
+When the image is complete it fetches `firmware.bin.sig` (a 256-byte **RSA-2048** signature, padded past the tail-drop and read back the same way) and verifies it against the public key compiled into firmware (`mbedtls_pk_verify`, PKCS#1 v1.5 / SHA-256). The install gate is a single short-circuit:
+
+```c
+if (ok && done >= total && otaVerifySig(url, digest) && Update.end(true)) { /* reboot */ }
+else Update.abort();
+```
+
+`Update.end(true)` — which sets the boot partition — runs **only** after the signature verifies over the digest, and only when the offered version is strictly newer (`verNewer`, anti-rollback). A truncated, corrupt, unsigned, tampered, or downgraded image is aborted and the running firmware is left untouched. Full derivation of the 3072-byte tail-drop and the dead ends that preceded this: [docs/OTA-INVESTIGATION.md](docs/OTA-INVESTIGATION.md).
+
 ## Data usage (fits easily in a 5 GB plan)
 
 | Regime | Per report | Monthly |
