@@ -32,7 +32,7 @@
 #include "ota_pubkey.h"          // OTA_PUBKEY_PEM — image-signing public key
 #include "deviceid.h"            // deviceNameValid(), chipSeedName() — host-testable
 
-#define FW_VERSION "2.56"
+#define FW_VERSION "2.57"
 
 #define SerialMon Serial
 #define SerialAT  Serial1

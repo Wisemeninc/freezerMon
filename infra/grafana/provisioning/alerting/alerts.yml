@@ -41,7 +41,7 @@ groups:
               type: threshold
               expression: B
               conditions:
-                - evaluator: { type: gt, params: [-12] }
+                - evaluator: { type: gt, params: [8] }   # cooler food-safety ceiling — keep in sync with TEMP_ALARM_C in firmware config.h
 
       - uid: fm-device-stale
         title: Device offline / no data

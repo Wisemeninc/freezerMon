@@ -104,7 +104,7 @@ cd infra && set -a && source .env && set +a && bun scripts/CreateOperator.ts
 
 ## Alerting
 
-Three rules are provisioned: cabinet temp above −12 °C for 10 min, no data for 15 min (offline/out of coverage), battery under 3.4 V.
+Three rules are provisioned: cabinet temp above 8 °C for 10 min (cooler food-safety ceiling — set it *above* your unit's normal band and keep it in sync with `TEMP_ALARM_C` in `config.h`, or the alarm never clears and the fast reporting cadence drains the battery ~5×; a freezer would use e.g. −12), no data for 15 min (offline/out of coverage), battery under 3.4 V.
 Point them at your phone: Grafana → Alerting → Contact points → add **Telegram** (bot token + chat id) or email, then set it as the default notification policy. If your Grafana version rejects the provisioned rule schema, recreate the three rules in the UI — the Flux queries in `infra/grafana/provisioning/alerting/alerts.yml` copy-paste directly.
 
 ## Field debugging (WiFi console)

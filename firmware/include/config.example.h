@@ -47,7 +47,7 @@
 #define GNSS_STUCK_CYCLES       3
 
 // ---- Alarm thresholds ----
-#define TEMP_ALARM_C            -12.0f           // cabinet warmer than this = breach
+#define TEMP_ALARM_C            8.0f             // cabinet warmer than this = breach. Cooler: 8 (food-safety ceiling above a 4-6C band); freezer: -12. MUST sit above the unit's normal band or the alarm never clears (permanent 60s reporting = ~5x battery drain). Match the Grafana rule in infra/grafana/provisioning/alerting/alerts.yml
 #define ALARM_CONSECUTIVE       3                // consecutive breaches before alert
 #define BATT_LOW_MV             3400
 #define EXT_POWER_MIN_MV        4400             // VIN/solar ADC above this = external power present
