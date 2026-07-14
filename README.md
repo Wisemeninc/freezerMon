@@ -1,6 +1,6 @@
 # freezerMon
 
-Cellular monitoring for a mobile cooling unit. A LilyGO **T-A7608E-H** (ESP32 + SIMCom A7608E-H LTE Cat-4) reads temperature, door, battery/power-source and GPS, and publishes JSON over **LTE → MQTT**. A self-hosted stack (**Mosquitto → Telegraf → InfluxDB → Grafana**) stores it, draws dashboards, and fires alerts.
+Cellular monitoring for a mobile cooling unit. A LilyGO **[T-A7608E-H](https://lilygo.cc/products/t-a7608e-h)** (ESP32 + SIMCom A7608E-H LTE Cat-4) reads temperature, door, battery/power-source and GPS, and publishes JSON over **LTE → MQTT**. A self-hosted stack (**Mosquitto → Telegraf → InfluxDB → Grafana**) stores it, draws dashboards, and fires alerts.
 
 ```
 [DS18B20 x2]──┐
