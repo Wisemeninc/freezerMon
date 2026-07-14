@@ -23,9 +23,12 @@ Two operating regimes: on **battery** the device deep-sleeps between reports (de
 | `rssi_dbm` | LTE signal |
 | `lat`, `lon` | GPS fix (refreshed every Nth report to save power) |
 | `alarm` | 1 = temp breach active (N consecutive over-threshold samples) |
+| `moving` | 1 = unit displaced > `MOVE_ALARM_M` from its parked position (GPS-based) |
 | `buffered` | 1 = backfilled sample from an offline gap |
 
-Alerts (`freezer/<id>/alert`): `temp_breach`, `door_open`, `batt_low`.
+Alerts (`freezer/<id>/alert`): `temp_breach`, `door_open`, `batt_low`, `moving`.
+
+**Movement detection** (GPS-based — the board has no accelerometer): the unit anchors its position while parked; any fix more than `MOVE_ALARM_M` (150 m, above GPS scatter) from the anchor raises a one-shot `moving` alert and switches to **fast reporting (60 s) with a GPS fix every wake**, so the map tracks the unit live. After `MOVE_STOP_CYCLES` consecutive near-still fixes it re-anchors at the new spot and drops back to the normal cadence. Detection latency while parked is bounded by the GPS cadence (a fix every `GPS_EVERY_N_REPORTS` wakes, ~30 min) — a battery-friendly trade-off; wire a vibration sensor to a spare interrupt pin if you need instant wake-on-motion.
 No-coverage readings are buffered in RTC memory (24 samples) and backfilled with corrected timestamps on reconnect.
 
 ## Hardware & wiring

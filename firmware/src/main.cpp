@@ -31,8 +31,9 @@
 #include "mbedtls/pk.h"          // RSA-2048 signature verify
 #include "ota_pubkey.h"          // OTA_PUBKEY_PEM — image-signing public key
 #include "deviceid.h"            // deviceNameValid(), chipSeedName() — host-testable
+#include "geo.h"                 // geoDistM() — movement detection, host-testable
 
-#define FW_VERSION "2.57"
+#define FW_VERSION "2.58"
 
 #define SerialMon Serial
 #define SerialAT  Serial1
@@ -77,6 +78,13 @@ RTC_DATA_ATTR uint8_t  gnssZeroSatStreak = 0;   // GNSS-wedge watchdog: consecut
 RTC_DATA_ATTR float    lastLat = 0, lastLon = 0;
 RTC_DATA_ATTR uint32_t rtcEpoch = 0;            // best-known epoch, aged across sleeps
 RTC_DATA_ATTR uint32_t lastAgpsEpoch = 0;       // when AGPS ephemeris was last downloaded (validity ~hours)
+// movement detection: position is anchored while parked; a fix > MOVE_ALARM_M
+// from the anchor flags the unit as moving (alert + fast cadence + GPS every
+// wake) until MOVE_STOP_CYCLES near-still fixes re-anchor it.
+RTC_DATA_ATTR float    anchorLat = 0, anchorLon = 0;
+RTC_DATA_ATTR uint8_t  movingActive = 0;        // in telemetry as `moving`; drives fast cadence
+RTC_DATA_ATTR uint8_t  stillStreak = 0;         // consecutive near-still fixes while moving
+RTC_DATA_ATTR uint8_t  moveAlertPending = 0;    // `moving` alert queued until MQTT is next up
 
 uint32_t awakeStart = 0;
 
@@ -418,6 +426,7 @@ static void startDebugAp() {
     doc["vbat_mv"]   = s.vbatMv;
     doc["vsolar_mv"] = s.vsolarMv;
     doc["alarm"]     = alarmActive;
+    doc["moving"]    = movingActive;
     doc["buffered"]  = rtcBufCount;
     doc["lat"]       = lastLat;
     doc["lon"]       = lastLon;
@@ -1135,8 +1144,39 @@ static bool readGnssFix(float *outLat, float *outLon, int *satsUsed) {
   return true;
 }
 
+// Called on every successful GPS fix (new position already in lastLat/lastLon,
+// previous fix passed in). Anchor-based, so slow creep still trips the alert:
+// parked -> anchor is home; >MOVE_ALARM_M from anchor = moving (alert once,
+// fast cadence, GPS every wake); moving -> MOVE_STOP_CYCLES consecutive fixes
+// within MOVE_STOP_M of each other = parked again, re-anchor at the new spot.
+static void updateMovement(float prevLat, float prevLon) {
+  if (anchorLat == 0 && anchorLon == 0) {               // first fix ever / post cold boot
+    anchorLat = lastLat; anchorLon = lastLon;
+    return;
+  }
+  if (!movingActive) {
+    float dAnchor = geoDistM(anchorLat, anchorLon, lastLat, lastLon);
+    if (dAnchor > MOVE_ALARM_M) {
+      movingActive = 1; stillStreak = 0; moveAlertPending = 1;
+      logLine("[move] MOVING - %dm from anchor", (int)dAnchor);
+    }
+  } else {
+    float dPrev = (prevLat != 0 || prevLon != 0) ? geoDistM(prevLat, prevLon, lastLat, lastLon) : 0;
+    if (dPrev < MOVE_STOP_M) {
+      if (++stillStreak >= MOVE_STOP_CYCLES) {
+        movingActive = 0; stillStreak = 0;
+        anchorLat = lastLat; anchorLon = lastLon;       // this is the new parked spot
+        logLine("[move] stopped - re-anchored");
+      }
+    } else {
+      stillStreak = 0;
+    }
+  }
+}
+
 static bool maybeGps(uint32_t fixTimeoutS) {
-  if (reportsSinceGps < GPS_EVERY_N_REPORTS) { reportsSinceGps++; return false; }
+  // while moving, track every wake so the map follows the unit live
+  if (!movingActive && reportsSinceGps < GPS_EVERY_N_REPORTS) { reportsSinceGps++; return false; }
   // Retry cadence, not fix cadence: reset the counter for the ATTEMPT. A
   // no-fix cycle (unit indoors) must wait N reports again — resetting only on
   // success made GNSS hunt 90 s on EVERY wake and starve the MQTT session.
@@ -1155,6 +1195,7 @@ static bool maybeGps(uint32_t fixTimeoutS) {
   float lat, lon;
   int sats = 0, maxSats = 0;
   bool gotFix = false;
+  float prevLat = lastLat, prevLon = lastLon;           // previous fix, for movement detection
   uint32_t start = millis();
   while (millis() - start < fixTimeoutS * 1000UL && awakeBudgetLeft()) {
     bool fix = readGnssFix(&lat, &lon, &sats);
@@ -1166,6 +1207,7 @@ static bool maybeGps(uint32_t fixTimeoutS) {
     }
     delay(2000);
   }
+  if (gotFix) updateMovement(prevLat, prevLon);
   // GNSS-wedge watchdog: an engine that is powered but tracks 0 satellites the
   // whole window is stuck (only a supply cut recovers it). Seeing any sat —
   // even without a full fix — means it's alive, just acquiring.
@@ -1203,6 +1245,7 @@ static bool publishSample(const Sample &s, uint32_t nowEpoch, bool buffered,
     doc["lon"] = lastLon;
   }
   doc["alarm"]     = s.alarm;
+  doc["moving"]    = movingActive;
   doc["boot"]      = bootCount;
   doc["buffered"]  = buffered ? 1 : 0;
   doc["wake"]      = wakeReason;
@@ -1404,6 +1447,12 @@ void setup() {
         // duplicate point (the fix still ships next wake via lastLat/lastLon).
         if (coldBoot && gotFix && published && now && mqtt.connected())
           publishSample(s, now, false, wakeReason, rssiDbm);
+        // movement transition detected by this (or an earlier, offline) fix —
+        // fast cadence + GPS-every-wake are already active via movingActive
+        if (moveAlertPending && mqtt.connected()) {
+          publishAlert(s, now, "moving");
+          moveAlertPending = 0;
+        }
       }
     } else {
       logLine("[net] no connectivity this cycle");
@@ -1450,8 +1499,8 @@ void setup() {
     }
   }
 
-  uint32_t interval = (s.alarm || s.doorOpen) ? REPORT_INTERVAL_FAST_S
-                                              : REPORT_INTERVAL_S;
+  uint32_t interval = (s.alarm || s.doorOpen || movingActive) ? REPORT_INTERVAL_FAST_S
+                                                              : REPORT_INTERVAL_S;
   goToSleep(interval);
 }
 
@@ -1488,7 +1537,9 @@ void loop() {
   pinMode(DOOR_PIN, INPUT_PULLUP);
   uint8_t door = digitalRead(DOOR_PIN) == HIGH ? 1 : 0;
   bool doorChanged = door != lastDoor;
-  bool reportDue = millis() - lastReportMs >= (uint32_t)REPORT_INTERVAL_POWERED_S * 1000UL;
+  // while moving, report at the fast cadence even on external power (live tracking)
+  uint32_t poweredInterval = movingActive ? REPORT_INTERVAL_FAST_S : REPORT_INTERVAL_POWERED_S;
+  bool reportDue = millis() - lastReportMs >= poweredInterval * 1000UL;
   if (!doorChanged && !reportDue) return;
 
   awakeStart = millis();                                // re-arm bounded-op budget
@@ -1496,6 +1547,10 @@ void loop() {
   readSensors(s);
   evaluateAlarm(s);
   maybeGps(GPS_FIX_TIMEOUT_S);
+  if (moveAlertPending && mqtt.connected()) {           // movement detected by that fix
+    publishAlert(s, rtcEpoch, "moving");
+    moveAlertPending = 0;
+  }
   // GNSS-wedge recovery (powered regime only — battery self-heals via the
   // deep-sleep rail drop). A continuously-powered modem never loses the rail,
   // so when the watchdog reports the engine stuck, force a full power cycle
@@ -1537,6 +1592,6 @@ void loop() {
     goToSleep(REPORT_INTERVAL_FAST_S);
   }
   if (!s.extPower) {                                    // power pulled -> battery regime
-    goToSleep(s.alarm || s.doorOpen ? REPORT_INTERVAL_FAST_S : REPORT_INTERVAL_S);
+    goToSleep(s.alarm || s.doorOpen || movingActive ? REPORT_INTERVAL_FAST_S : REPORT_INTERVAL_S);
   }
 }
