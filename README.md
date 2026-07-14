@@ -111,7 +111,7 @@ Point them at your phone: Grafana → Alerting → Contact points → add **Tele
 
 The device broadcasts its own WiFi access point — `freezermon-<DEVICE_ID>`, password `DEBUG_AP_PASSWORD` from `config.h` (change the default!) — for on-site debugging with no cellular dependency:
 
-- **After a cold boot** (power-on/reset): console stays up for `DEBUG_AP_WINDOW_S` (default 10 min) before the first deep sleep — connect while installing.
+- **After a cold boot** (power-on/reset): console stays up for `DEBUG_AP_WINDOW_S` (default 2 min) before the first deep sleep — connect while installing.
 - **On external power**: console is always available.
 - **On battery timer/door wakes**: WiFi stays off — zero power cost in normal operation.
 
@@ -119,18 +119,20 @@ Connect to the AP, then: `http://192.168.4.1/status` (live readings + state, JSO
 
 ### OTA updates
 
+Updates are **cryptographically signed**: the device installs an image only if its RSA-2048/SHA-256 signature — taken over the **version + image**, so downgrades and tampering both fail — verifies against the public key baked in at build time. This holds even though the command and download channels aren't themselves authenticated. Model + threat analysis: [docs/HARDENING.md](docs/HARDENING.md); the (long) road to a reliable pull on this modem: [docs/OTA-INVESTIGATION.md](docs/OTA-INVESTIGATION.md).
+
 **Over LTE (primary)** — no site visit at all:
 
 ```bash
 # 1. bump FW_VERSION in firmware/src/main.cpp, build:
 pio run -e t-a7608-tls
-# 2. publish (uploads image to the server, sets the retained command):
-bun infra/scripts/PublishFirmware.ts 1.4 cooler-01
+# 2. sign + split + publish (also sets the retained MQTT command):
+bun infra/scripts/PublishFirmware.ts 2.54 cooler-01
 ```
 
-The device checks `freezer/<id>/cmd` (retained) after every report; when `ota_ver` differs from its own version it streams the image from `https://freezer.shitshow.it/fw/<token>/…` over TLS into the inactive OTA slot and reboots — the next telemetry's `fw` field confirms the new version. Guard-rails: on battery it only updates above `OTA_MIN_VBAT_MV` (default 3.7 V; deferred otherwise until charged or powered), the watchdog stays fed during the ~2–4 min 2G download, and an interrupted transfer leaves the running firmware untouched. Data cost: ~0.9 MB per update.
+`PublishFirmware.ts` signs the image, splits it into overlapping ~32 KB pieces (the A7608's HTTP stack can't hand back a ~900 KB response in one go — see the investigation doc), and sets a retained command on `freezer/<id>/cmd`. After each report the device compares `ota_ver`; if it's **strictly newer** (anti-rollback) it pulls the pieces over plain HTTP, reassembles and hashes them, verifies the signature, installs into the inactive OTA slot, and reboots — the next telemetry's `fw` field confirms it. Guard-rails: on battery it updates only above `OTA_MIN_VBAT_MV` (default 3.7 V), the watchdog stays fed, per-piece retries ride out cellular blips, and a bad / interrupted / unsigned image leaves the running firmware untouched. Data cost: ~1 MB per update.
 
-**Over the debug WiFi (fallback)** — `http://192.168.4.1/update`: upload `firmware.bin` from a browser while connected to the debug AP (cold-boot window or external power). Same dual-slot safety.
+**Over the debug WiFi (fallback)** — `http://192.168.4.1/update`: upload `firmware.bin` **and** `firmware.bin.sig` plus the version; it installs only if the signature verifies. Same dual-slot safety. (This is the trusted channel to establish the *first* signed build on a fleet — see HARDENING.md.)
 
 ## Data usage (fits easily in a 5 GB plan)
 
@@ -140,13 +142,16 @@ The device checks `freezer/<id>/cmd` (retained) after every report; when `ota_ve
 | Battery, 5-min cadence, TLS | ~8 KB (handshake each wake) | ~70–90 MB |
 | External power, 2-min cadence | ~0.5 KB (persistent session) | ~15 MB |
 
-GPS is received, not transmitted — it costs no data. Worst case (TLS on battery) uses **under 2 %** of a 5 GB monthly allowance; a 5 GB plan gives ~50× headroom.
+GPS itself is received, not transmitted. **Assisted GNSS** (`AT+CAGPS`) downloads a few KB of ephemeris at most every ~2 h (`AGPS_REFRESH_S`) so cold fixes land in seconds instead of timing out — a small, bounded cost. Worst case (TLS on battery) still uses **under 2 %** of a 5 GB monthly allowance; a 5 GB plan gives ~50× headroom.
 
 ## Security
 
-- Broker requires authentication; the stack refuses to start with unset secrets (`${VAR:?}`).
-- **TLS upgrade path**: put certs (e.g. Let's Encrypt) in `infra/mosquitto/config/certs/`, uncomment the 8883 listener in `mosquitto.conf`, publish port 8883, then flash the device with `pio run -e t-a7608-tls -t upload` and set `MQTT_PORT 8883` in `config.h`. Note: the fork's secure client encrypts but does **not** validate the server certificate by default — for full MITM protection load a CA cert via the modem's certificate store (see the fork's SSL examples).
-- `config.h` and `.env` are gitignored; only `.example` templates are committed.
+Full model and the independent-review findings are in [docs/HARDENING.md](docs/HARDENING.md). In brief:
+
+- **Signed OTA** is the primary control: every image is RSA-2048/SHA-256 signed and verified on-device (with the version bound in, for anti-rollback) before install — over both LTE *and* the WiFi `/update` form. So even though the MQTT command channel isn't broker-authenticated (the modem's TLS runs `authmode=0`), a MITM can't push forged, tampered, or downgraded firmware. **Generate your own signing key first:** `bun infra/scripts/GenSigningKey.ts` (the committed `ota_pubkey.h` is a placeholder).
+- Broker requires authentication; the stack refuses to start with unset secrets (`${VAR:?}`). MQTT runs over TLS (port 8883) — the fork's secure client encrypts but doesn't validate the broker cert by default, so signed-OTA is what guarantees firmware integrity regardless; for full MQTT MITM protection, load a CA cert via the modem's certificate store.
+- `config.h`, `.env`, and `infra/keys/` (the OTA **private** signing key) are gitignored; only `.example` templates and the **public** key are committed.
+- Known follow-ups (see HARDENING.md): per-device credentials, and a unique high-entropy `DEBUG_AP_PASSWORD` per unit.
 
 ## Power expectations
 
