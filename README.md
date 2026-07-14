@@ -43,6 +43,12 @@ No-coverage readings are buffered in RTC memory (24 samples) and backfilled with
 ## Firmware (PlatformIO)
 
 ```bash
+# ONE-TIME: generate YOUR OTA image-signing keypair (run from the repo root).
+# Writes firmware/include/ota_pubkey.h (public, committed) + infra/keys/ (private,
+# gitignored). The repo ships a placeholder key you MUST replace — otherwise you
+# can't sign updates and your fleet would trust someone else's key.
+bun infra/scripts/GenSigningKey.ts
+
 cd firmware
 cp include/config.example.h include/config.h   # then edit (see below)
 pio run -e t-a7608-tls -t upload               # build + flash over USB (TLS build)

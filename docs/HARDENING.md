@@ -103,8 +103,15 @@ install by any path.
 Reject `ota_ver` numerically older than the running `FW_VERSION` unless an explicit
 override is set.
 
-## Key rotation
+## Key management
 
-If the private key is ever exposed: generate a new keypair, update
-`ota_pubkey.h`, and ship it via a **UART flash** (a compromised key can't sign the
-transition, so OTA can't be trusted for it).
+- **Initial setup (every deployment):** run `bun infra/scripts/GenSigningKey.ts` once,
+  from the repo root, before building firmware. It generates the RSA-2048 keypair,
+  writes the private key to `infra/keys/ota_sign_priv.pem` (gitignored, build-host
+  only), and (re)writes `firmware/include/ota_pubkey.h` (committed). The repo ships a
+  **placeholder** `ota_pubkey.h` (the original author's public key) that you MUST
+  replace with your own — otherwise you can't sign updates (you don't hold the private
+  key) and your fleet would trust someone else's key.
+- **Rotation (if the private key is exposed):** delete `infra/keys/ota_sign_priv.pem`,
+  re-run `GenSigningKey.ts`, and ship the new `ota_pubkey.h` via a **UART flash** — a
+  compromised key can't sign the transition, so OTA can't be trusted for it.
