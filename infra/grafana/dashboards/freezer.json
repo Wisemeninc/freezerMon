@@ -14,13 +14,24 @@
         "name": "device",
         "label": "Unit",
         "type": "query",
+        "query": {
+          "query": "import \"influxdata/influxdb/schema\"\nschema.tagValues(bucket: \"telemetry\", tag: \"device\")"
+        },
+        "current": {
+          "selected": false,
+          "text": "cooler-01",
+          "value": "cooler-01"
+        },
+        "options": [],
+        "includeAll": false,
+        "multi": false,
         "datasource": {
           "type": "influxdb",
           "uid": "influxdb"
         },
-        "query": "import \"influxdata/influxdb/schema\"\nschema.tagValues(bucket: \"telemetry\", tag: \"device\")",
-        "refresh": 2,
-        "current": {}
+        "definition": "import \"influxdata/influxdb/schema\"\nschema.tagValues(bucket: \"telemetry\", tag: \"device\")",
+        "refresh": 1,
+        "sort": 1
       }
     ]
   },
@@ -521,25 +532,34 @@
       "fieldConfig": {
         "defaults": {
           "unit": "mvolt",
-          "displayName": "Battery",
-          "color": {
-            "mode": "fixed",
-            "fixedColor": "#4E79A7"
-          },
           "custom": {
             "lineWidth": 2,
-            "fillOpacity": 8,
+            "fillOpacity": 0,
             "spanNulls": true
           }
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "vbat_mv"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Battery"
+              }
+            ]
+          }
+        ]
       },
       "options": {
         "legend": {
-          "displayMode": "hidden"
+          "displayMode": "list",
+          "placement": "bottom"
         },
         "tooltip": {
-          "mode": "single"
+          "mode": "multi"
         }
       }
     },
@@ -566,25 +586,34 @@
       "fieldConfig": {
         "defaults": {
           "unit": "dBm",
-          "displayName": "RSSI",
-          "color": {
-            "mode": "fixed",
-            "fixedColor": "#4E79A7"
-          },
           "custom": {
             "lineWidth": 2,
-            "fillOpacity": 8,
+            "fillOpacity": 0,
             "spanNulls": true
           }
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "rssi_dbm"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "RSSI"
+              }
+            ]
+          }
+        ]
       },
       "options": {
         "legend": {
-          "displayMode": "hidden"
+          "displayMode": "list",
+          "placement": "bottom"
         },
         "tooltip": {
-          "mode": "single"
+          "mode": "multi"
         }
       }
     },
