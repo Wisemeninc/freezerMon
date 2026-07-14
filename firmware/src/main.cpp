@@ -30,8 +30,9 @@
 #include "mbedtls/md.h"          // streaming SHA-256 (version-stable md_* API)
 #include "mbedtls/pk.h"          // RSA-2048 signature verify
 #include "ota_pubkey.h"          // OTA_PUBKEY_PEM — image-signing public key
+#include "deviceid.h"            // deviceNameValid(), chipSeedName() — host-testable
 
-#define FW_VERSION "2.55"
+#define FW_VERSION "2.56"
 
 #define SerialMon Serial
 #define SerialAT  Serial1
@@ -175,54 +176,46 @@ static void logLine(const char *fmt, ...) {
 }
 
 // ---------- device identity (NVS-backed) ----------
-// A valid name is what ends up in MQTT topics and the InfluxDB `device` tag, so
-// keep it to the same charset those tolerate: lowercase letters, digits, hyphen.
-static bool deviceNameValid(const char *n) {
-  size_t len = strlen(n);
-  if (len < 1 || len > 30) return false;
-  for (size_t i = 0; i < len; i++) {
-    char c = n[i];
-    if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-')) return false;
-  }
-  return true;
+// deviceNameValid() and chipSeedName() live in deviceid.h (host-testable).
+
+// Persist a name to NVS. Validates first, and reports the actual write result
+// so callers never claim success on a failed write. Caller reboots so every
+// MQTT topic / client id / payload tag re-derives cleanly.
+static bool persistDeviceId(const char *name) {
+  if (!deviceNameValid(name)) return false;
+  Preferences prefs;
+  prefs.begin("freezermon", false);
+  size_t written = prefs.putString("devid", name);
+  prefs.end();
+  return written > 0;
 }
 
-// Resolve deviceId once at boot: stored NVS name wins; if unset (fresh unit or
-// first boot after this firmware), seed it — from the compile-time DEVICE_ID if
-// one is given, else a unique-per-chip default so two un-named units never
-// collide on the same MQTT topic. Seeding writes NVS once, so it's stable after.
+// Resolve deviceId once at boot: a valid stored NVS name wins; otherwise seed it
+// — from the compile-time DEVICE_ID if that is itself a VALID name, else a
+// unique-per-chip default so two un-named units never collide. The seed is
+// validated so an invalid stored/compiled value can never keep re-seeding every
+// wake (flash wear) or leak into topics; the chip default is always valid.
 static void resolveDeviceId() {
   Preferences prefs;
   prefs.begin("freezermon", true);                 // read-only
   String stored = prefs.getString("devid", "");
   prefs.end();
-  if (stored.length() > 0 && deviceNameValid(stored.c_str())) {
+  if (deviceNameValid(stored.c_str())) {
     strlcpy(deviceId, stored.c_str(), sizeof(deviceId));
     return;
   }
   char seed[32];
-  if (strlen(DEVICE_ID) > 0) {                      // explicit name compiled in
+  if (deviceNameValid(DEVICE_ID)) {                // explicit, valid compiled-in name
     strlcpy(seed, DEVICE_ID, sizeof(seed));
-  } else {                                          // derive a unique default
-    uint64_t mac = ESP.getEfuseMac();
-    snprintf(seed, sizeof(seed), "cooler-%06x", (uint32_t)(mac & 0xFFFFFF));
+  } else {                                          // derive a unique default from the NIC-unique MAC bytes
+    chipSeedName(ESP.getEfuseMac(), seed, sizeof(seed));
   }
-  prefs.begin("freezermon", false);
-  prefs.putString("devid", seed);
-  prefs.end();
-  strlcpy(deviceId, seed, sizeof(deviceId));
-  logLine("[id] seeded device name = %s", deviceId);
-}
-
-// Persist a new name to NVS. Caller reboots so every MQTT topic / client id /
-// payload tag re-derives cleanly from the new value.
-static bool persistDeviceId(const char *name) {
-  if (!deviceNameValid(name)) return false;
-  Preferences prefs;
-  prefs.begin("freezermon", false);
-  prefs.putString("devid", name);
-  prefs.end();
-  return true;
+  strlcpy(deviceId, seed, sizeof(deviceId));        // use it this boot regardless of the NVS write
+  Preferences w;
+  w.begin("freezermon", false);
+  bool ok = w.putString("devid", seed) > 0;
+  w.end();
+  logLine(ok ? "[id] seeded device name = %s" : "[id] seed name = %s (NVS write FAILED)", deviceId);
 }
 
 // ---------- helpers ----------
@@ -391,7 +384,12 @@ static void startDebugAp() {
   char ssid[48];
   snprintf(ssid, sizeof(ssid), "freezermon-%s", deviceId);
   WiFi.mode(WIFI_AP);
-  WiFi.softAP(ssid, DEBUG_AP_PASSWORD);
+  // deviceNameValid() caps the name so "freezermon-<name>" fits the 32-char SSID
+  // limit; if the radio still refuses the SSID, fall back to a safe fixed one so
+  // /setname (the only field rename path) is never stranded.
+  if (!WiFi.softAP(ssid, DEBUG_AP_PASSWORD)) WiFi.softAP("freezermon-setup", DEBUG_AP_PASSWORD);
+  static const char *setnameHdr[] = { "Origin" };
+  debugServer.collectHeaders(setnameHdr, 1);           // /setname CSRF same-origin check
 
   debugServer.on("/", []() {
     debugServer.send(200, "text/plain",
@@ -562,20 +560,32 @@ static void startDebugAp() {
   // Rename this unit from the field console. The name is stored in NVS (survives
   // OTA) and drives the MQTT topics + the InfluxDB `device` tag, so one firmware
   // image serves a fleet — flash, then name each unit here. Reboots to re-derive.
-  debugServer.on("/setname", []() {
+  // GET shows the form; the rename itself is POST-only and same-origin-checked,
+  // so a drive-by page loaded on the AP can't rename+reboot the unit via a bare
+  // <img src=".../setname?name=x"> (CSRF). A rename to the current name is a
+  // no-op so it can't be scripted into a reboot loop.
+  debugServer.on("/setname", HTTP_GET, []() {
+    debugServer.send(200, "text/html",
+      "<h3>Device name</h3>current: <b>" + String(deviceId) + "</b>"
+      "<form method='POST' action='/setname'>"
+      "new name: <input name='name' required> "
+      "<input type='submit' value='Set + reboot'></form>"
+      "<small>lowercase letters, digits, hyphen; 1-21 chars. "
+      "Changes the MQTT topics and the Grafana device tag.</small>");
+  });
+  debugServer.on("/setname", HTTP_POST, []() {
+    if (debugServer.hasHeader("Origin") &&
+        debugServer.header("Origin") != "http://192.168.4.1") {
+      debugServer.send(403, "text/plain", "cross-origin request refused\n");
+      return;
+    }
     String name = debugServer.arg("name");
-    if (name.length() == 0) {
-      debugServer.send(200, "text/html",
-        "<h3>Device name</h3>current: <b>" + String(deviceId) + "</b>"
-        "<form method='GET' action='/setname'>"
-        "new name: <input name='name' required> "
-        "<input type='submit' value='Set + reboot'></form>"
-        "<small>lowercase letters, digits, hyphen; 1-30 chars. "
-        "Changes the MQTT topics and the Grafana device tag.</small>");
+    if (name == String(deviceId)) {                    // unchanged -> no NVS write, no reboot
+      debugServer.send(200, "text/plain", "name unchanged\n");
       return;
     }
     if (!persistDeviceId(name.c_str())) {
-      debugServer.send(400, "text/plain", "invalid name - use [a-z0-9-], 1-30 chars\n");
+      debugServer.send(400, "text/plain", "invalid name - use [a-z0-9-], 1-21 chars\n");
       return;
     }
     debugServer.send(200, "text/plain", "renamed to " + name + " - rebooting\n");
@@ -1389,7 +1399,10 @@ void setup() {
       // timer wakes keep the full window and the after-publish-only behaviour.
       if (!s.extPower) {
         bool gotFix = maybeGps(coldBoot ? GPS_FIRST_BOOT_TIMEOUT_S : GPS_FIX_TIMEOUT_S);
-        if (coldBoot && gotFix && published && mqtt.connected())
+        // `now` guard: if the clock never synced this cycle, `ts` is omitted from
+        // both frames and the same-ts upsert can't happen -> skip to avoid a
+        // duplicate point (the fix still ships next wake via lastLat/lastLon).
+        if (coldBoot && gotFix && published && now && mqtt.connected())
           publishSample(s, now, false, wakeReason, rssiDbm);
       }
     } else {
