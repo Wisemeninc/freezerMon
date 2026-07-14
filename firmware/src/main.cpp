@@ -31,7 +31,7 @@
 #include "mbedtls/pk.h"          // RSA-2048 signature verify
 #include "ota_pubkey.h"          // OTA_PUBKEY_PEM — image-signing public key
 
-#define FW_VERSION "2.54"
+#define FW_VERSION "2.55"
 
 #define SerialMon Serial
 #define SerialAT  Serial1
@@ -1125,13 +1125,13 @@ static bool readGnssFix(float *outLat, float *outLon, int *satsUsed) {
   return true;
 }
 
-static void maybeGps() {
-  if (reportsSinceGps < GPS_EVERY_N_REPORTS) { reportsSinceGps++; return; }
+static bool maybeGps(uint32_t fixTimeoutS) {
+  if (reportsSinceGps < GPS_EVERY_N_REPORTS) { reportsSinceGps++; return false; }
   // Retry cadence, not fix cadence: reset the counter for the ATTEMPT. A
   // no-fix cycle (unit indoors) must wait N reports again — resetting only on
   // success made GNSS hunt 90 s on EVERY wake and starve the MQTT session.
   reportsSinceGps = 0;
-  if (!modem.enableGPS(GPS_ANTENNA_POWER_PIN, GPS_ANTENNA_POWER_LEVEL)) { logLine("[gps] enable failed"); return; }
+  if (!modem.enableGPS(GPS_ANTENNA_POWER_PIN, GPS_ANTENNA_POWER_LEVEL)) { logLine("[gps] enable failed"); return false; }
   // Assisted GNSS: pull current ephemeris from SIMCom's AGNSS server over the (already
   // attached) data bearer so a cold start fixes in seconds instead of timing out at 90 s.
   // AGPS data stays valid a few hours → refresh at most every ~2 h to spare the SIM.
@@ -1146,7 +1146,7 @@ static void maybeGps() {
   int sats = 0, maxSats = 0;
   bool gotFix = false;
   uint32_t start = millis();
-  while (millis() - start < GPS_FIX_TIMEOUT_S * 1000UL && awakeBudgetLeft()) {
+  while (millis() - start < fixTimeoutS * 1000UL && awakeBudgetLeft()) {
     bool fix = readGnssFix(&lat, &lon, &sats);
     if (sats > maxSats) maxSats = sats;
     if (fix) {
@@ -1172,6 +1172,7 @@ static void maybeGps() {
     logLine("[gps] PDP dropped during GNSS - reattaching");
     modem.gprsConnect(APN, GPRS_USER, GPRS_PASS);
   }
+  return gotFix;
 }
 
 static bool publishSample(const Sample &s, uint32_t nowEpoch, bool buffered,
@@ -1380,7 +1381,17 @@ void setup() {
       // MQTT is already done for this cycle and the modem is powered off before
       // sleep, so the next wake starts clean. Skips itself on external power
       // (loop() owns GNSS there) to avoid dropping a held MQTT session.
-      if (!s.extPower) maybeGps();
+      // GNSS: on a cold boot use a shorter, bounded window (AGPS makes fixes
+      // fast) instead of the full 90 s, and — if a fix lands AND the session
+      // survived GNSS — send a follow-up frame carrying the coords THIS wake
+      // rather than waiting for the next wake to carry lastLat/lastLon. Same
+      // ts, so InfluxDB upserts the coords onto this cycle's point. Periodic
+      // timer wakes keep the full window and the after-publish-only behaviour.
+      if (!s.extPower) {
+        bool gotFix = maybeGps(coldBoot ? GPS_FIRST_BOOT_TIMEOUT_S : GPS_FIX_TIMEOUT_S);
+        if (coldBoot && gotFix && published && mqtt.connected())
+          publishSample(s, now, false, wakeReason, rssiDbm);
+      }
     } else {
       logLine("[net] no connectivity this cycle");
     }
@@ -1471,7 +1482,7 @@ void loop() {
   Sample s;
   readSensors(s);
   evaluateAlarm(s);
-  maybeGps();
+  maybeGps(GPS_FIX_TIMEOUT_S);
   // GNSS-wedge recovery (powered regime only — battery self-heals via the
   // deep-sleep rail drop). A continuously-powered modem never loses the rail,
   // so when the watchdog reports the engine stuck, force a full power cycle

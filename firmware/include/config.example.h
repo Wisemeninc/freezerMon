@@ -35,7 +35,8 @@
 #define REPORT_INTERVAL_POWERED_S 120            // on external power: device stays AWAKE (no deep sleep) and reports at this cadence
 #define REPORT_INTERVAL_FAST_S  60               // while alarm active or door open
 #define GPS_EVERY_N_REPORTS     6                // GPS fix every Nth wake (~30 min)
-#define GPS_FIX_TIMEOUT_S       90               // give up on fix after this
+#define GPS_FIX_TIMEOUT_S       90               // give up on fix after this (periodic wakes)
+#define GPS_FIRST_BOOT_TIMEOUT_S 30              // shorter bounded window on a cold boot; if it fixes, the coords go out THIS wake in a follow-up frame
 #define AGPS_REFRESH_S          7200             // re-download AGPS ephemeris at most this often (~2 h) for fast cold fixes
 // GNSS active antenna power. T-A7608/T-A7670: 127 = modem VDD_AUX rail
 // (AT+CVAUXS=1). Without this the antenna is dead — zero satellites forever.
