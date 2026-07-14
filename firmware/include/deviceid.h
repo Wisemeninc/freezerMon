@@ -1,6 +1,6 @@
 #pragma once
 // Pure device-identity helpers, split out from main.cpp so they can be unit
-// tested on the host (see firmware/test/test_deviceid.cpp). No Arduino deps.
+// tested on the host (see firmware/host_test/test_deviceid.cpp). No Arduino deps.
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
