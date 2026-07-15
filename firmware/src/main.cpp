@@ -22,6 +22,7 @@
 #include <driver/rtc_io.h>
 #include <esp_sleep.h>
 #include <esp_task_wdt.h>
+#include <rom/rtc.h>             // rtc_get_reset_reason(core) — ROM-level reset forensics
 #include <time.h>
 #include <WiFi.h>
 #include <WebServer.h>
@@ -33,7 +34,7 @@
 #include "deviceid.h"            // deviceNameValid(), chipSeedName() — host-testable
 #include "geo.h"                 // geoDistM() — movement detection, host-testable
 
-#define FW_VERSION "2.60"
+#define FW_VERSION "2.61"
 
 #define SerialMon Serial
 #define SerialAT  Serial1
@@ -186,6 +187,23 @@ static void logLine(const char *fmt, ...) {
 
 // ---------- device identity (NVS-backed) ----------
 // deviceNameValid() and chipSeedName() live in deviceid.h (host-testable).
+
+// ---------- reset forensics (diagnosing the sw-reset-instead-of-sleep loop) ----------
+// RTC memory does NOT survive a software reset (only deep-sleep wakes), so the
+// breadcrumb lives in NVS: each cycle stamps how far it got; the next boot reads
+// where the previous one died. Phases:
+//   1 = setup started   2 = modem work done (publish/gps complete)
+//   3 = console window done, about to sleep
+//   4 = goToSleep: teardown done (modem off)   5 = immediately before esp_deep_sleep_start
+// prev_ph==5 + reset=sw means the chip died AT deep-sleep entry itself.
+static const char *g_resetStr = "?";
+static uint8_t prevPhase = 0;
+static void markPhase(uint8_t ph) {
+  Preferences p;
+  p.begin("freezermon", false);
+  p.putUChar("ph", ph);
+  p.end();
+}
 
 // Persist a name to NVS. Validates first, and reports the actual write result
 // so callers never claim success on a failed write. Caller reboots so every
@@ -1271,6 +1289,8 @@ static bool publishSample(const Sample &s, uint32_t nowEpoch, bool buffered,
   doc["boot"]      = bootCount;
   doc["buffered"]  = buffered ? 1 : 0;
   doc["wake"]      = wakeReason;
+  doc["rst"]       = g_resetStr;      // reset reason (diagnosing the no-sleep loop)
+  doc["ph"]        = prevPhase;       // how far the PREVIOUS cycle got (NVS breadcrumb, 5=reached sleep entry)
   doc["fw"]        = FW_VERSION;      // fleet version tracking + OTA confirmation
 
   char topic[64], payload[384];
@@ -1320,6 +1340,7 @@ static void goToSleep(uint32_t seconds) {
   if (modem.isGprsConnected()) modem.gprsDisconnect();
   modem.poweroff();                                     // modem fully off while sleeping
   delay(200);
+  markPhase(4);                                         // teardown done (wifi+mqtt+modem off)
 
   // age buffered samples and the epoch estimate by the coming sleep window
   for (uint8_t i = 0; i < rtcBufCount; i++) rtcBuf[i].ageS += seconds;
@@ -1341,6 +1362,7 @@ static void goToSleep(uint32_t seconds) {
   esp_sleep_enable_timer_wakeup((uint64_t)seconds * 1000000ULL);
   logLine("[sleep] %lus, buffered=%u", seconds, rtcBufCount);
   SerialMon.flush();
+  markPhase(5);                                         // next instruction is deep sleep itself
   esp_deep_sleep_start();
 }
 
@@ -1369,7 +1391,15 @@ void setup() {
       rr == ESP_RST_PANIC     ? "PANIC"     : rr == ESP_RST_TASK_WDT ? "TASK_WDT" :
       rr == ESP_RST_INT_WDT   ? "INT_WDT"   : rr == ESP_RST_DEEPSLEEP ? "deepsleep" :
       rr == ESP_RST_SW        ? "sw"        : "other";
-  logLine("[boot] #%lu fw=%s id=%s wake=%s reset=%s", bootCount, FW_VERSION, deviceId, wakeReason, resetStr);
+  g_resetStr = resetStr;
+  { Preferences p; p.begin("freezermon", true); prevPhase = p.getUChar("ph", 0); p.end(); }
+  markPhase(1);                                          // cycle started
+  // rr0/rr1 = ROM-level per-core reset reasons (rom/rtc.h) — e.g. 12=SW_CPU,
+  // 14=EXT_CPU, 15=BROWNOUT, 5=DEEPSLEEP; distinguishes esp_restart() from a
+  // panic-reboot whose PANIC hint (stored in RTC, wiped) degraded to plain "sw".
+  logLine("[boot] #%lu fw=%s id=%s wake=%s reset=%s rr0=%d rr1=%d prev_ph=%u",
+          bootCount, FW_VERSION, deviceId, wakeReason, resetStr,
+          (int)rtc_get_reset_reason(0), (int)rtc_get_reset_reason(1), prevPhase);
 
   // cold boot = installer likely present -> bring up the field-debug AP.
   // EXCEPT after a brownout: the AP's WiFi load stacks onto the already-heavy
@@ -1489,6 +1519,7 @@ void setup() {
     }
     modemBusy = false;                                  // console may query the modem again
   }
+  markPhase(2);                                         // modem work done
 
   if (!published) bufferSample(s);                      // data outlives connectivity
 
@@ -1528,6 +1559,7 @@ void setup() {
       delay(50);
     }
   }
+  markPhase(3);                                         // console window done, heading to sleep
 
   uint32_t interval = (s.alarm || s.doorOpen || movingActive) ? REPORT_INTERVAL_FAST_S
                                                               : REPORT_INTERVAL_S;
