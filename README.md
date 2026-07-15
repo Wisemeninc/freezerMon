@@ -277,6 +277,28 @@ Only if you're comfortable lifting an SMD pin — re-enable the chip's protectio
 
 Notes: in this orientation the single threshold guards the **cold** end only (the stock hot-side protection was disabled anyway); pair it with the firmware `cold_charge` alert for visibility. If SMD pin-lifting isn't your thing, the no-surgery alternative is an inline charger module with its own NTC input ahead of the board, or simply keeping the cell out of sub-zero placement.
 
+#### Option C (installed units): heated battery compartment + dual thermal switches
+
+For a permanently installed unit on a wired 5 V supply, extend Option A into a fully self-managing thermal envelope — **~€2 of bimetal discs, zero code, works even if the firmware is dead**:
+
+```
+                       ┌─[ KSD9700 NC ~15 °C ]──► PTC heater plate (in the battery box)
+wired 5 V supply ──────┤
+                       └─[ KSD9700 NO ~+5 °C ]──► board VIN (charge input)
+18650 ─────────(unswitched, in its holder)──────► board
+```
+
+Both discs are **thermally bonded to the cell**. Behaviour: compartment cold → heater on, charging blocked; warming past ~+5 °C → charging resumes; past ~15 °C → heater off. The cycle repeats as ambient demands — battery stays in its safe charge window through a freezing winter, autonomously.
+
+Build rules:
+
+- **Heater from external 5 V only, never the battery** — heating the cell from the cell drains it *and* puts a sustained load on a cold, high-IR cell (the brownout recipe). Wired to the supply, heat exists exactly when charging is possible — which is exactly when the cell must be warm.
+- **PTC heater element, not bare resistors**, next to a Li-ion cell: PTC plates (5 V, 2–3 W) are self-limiting — resistance climbs as they warm, so they physically cannot run away. 2–3 W holds a 15–25 °C rise in a small insulated compartment.
+- **Heater taps the 5 V *upstream* of the charge-cutoff switch** (as drawn) — downstream, it would lose power exactly when it's needed.
+- **Mind the KSD9700 hysteresis**: these discs re-close 5–15 °C below their open point, so a 10 °C NC part may not re-close until ~0 °C. Pick **15–20 °C NC** for the heater so the band stays comfortably above freezing.
+- **Supply sizing: 5 V / ≥12 W (2.4 A)**, wired in with a short run (≤10 cm is negligible drop). Sustained worst case ≈ charge (~1 A) + heater (~0.5 A) + board (~0.3 A) ≈ 1.8 A; the modem's 2 A TX bursts ride on the battery+caps, so the PSU only carries the average. Long thin leads are the hidden killer at these currents — 0.3 Ω of cable drops 0.6 V under burst.
+- **Regime note**: a supply wired into VIN drives the `ext_power` sense, so the powered regime engages (no deep sleep, 250 ms door polling, 2-min reports, console always on). When the cold-gate opens VIN, the unit falls back to the battery deep-sleep regime until the heater restores the compartment — expect the reporting cadence to shift with compartment temperature in deep winter. (A micro-USB supply does *not* trigger `ext_power` — it feeds VBUS, bypassing the sense; use VIN for installed units.)
+
 ## Production deployment (Traefik)
 
 To run it behind Traefik on a public host, use `infra/docker-compose.traefik.yml` and set **your own** domains in the router rules (the file ships `example.com` placeholders): e.g. one host for Grafana + the OTA `/fw/` path, and one for MQTT-over-TLS on the `mqtts` entrypoint — Traefik terminates TLS, with certs via Let's Encrypt once DNS points at the host. Keep secrets in the server's `.env`. Device config for production: `MQTT_HOST` = your MQTT domain, `MQTT_PORT 8883`, flash env `t-a7608-tls`.
