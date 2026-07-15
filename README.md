@@ -284,19 +284,19 @@ Notes: in this orientation the single threshold guards the **cold** end only (th
 For a permanently installed unit on a wired 5 V supply, extend Option A into a fully self-managing thermal envelope — **~€2 of bimetal discs, zero code, works even if the firmware is dead**:
 
 ```
-                       ┌─[ KSD9700 NC ~15 °C ]──[ RY thermal fuse 65 °C ]──► PI film heater 5 V 3 W
-wired 5 V supply ──────┤        (on the cell)         (cell side)              (in the battery box)
-                       └─[ KSD9700 NO ~+5 °C ]──► board VIN (charge input)
-18650 ─────────(unswitched, in its holder)──────► board
+                       ┌─[ KSD9700 NC 25 °C ]──[ thermal fuse 70 °C ]──► 2× PI film heater (12 V 7 W rated,
+wired 5 V supply ──────┤       (on the cell)        (cell side)           parallel at 5 V ≈ 2.4 W, in the box)
+                       └─[ KSD9700 NO 15 °C ]──► board VIN (charge input)
+18650 ────────(unswitched, in its holder)──────► board
 ```
 
-Both discs are **thermally bonded to the cell**. Behaviour: compartment cold → heater on, charging blocked; warming past ~+5 °C → charging resumes; past ~15 °C → heater off. The cycle repeats as ambient demands — battery stays in its safe charge window through a freezing winter, autonomously.
+Both discs are **thermally bonded to the cell**. Behaviour: compartment cold → heater on, charging blocked; warming past ~15 °C → charging resumes; past ~25 °C → heater off (re-closes ~10–15 °C lower, so the compartment cycles roughly 10–25 °C). The cycle repeats as ambient demands — battery stays in its safe charge window through a freezing winter, autonomously. (Ideal setpoints would be gate ~+5 °C / heater ~15 °C; the 15/25 pair reflects what's actually stocked in the KSD9700 low-temperature series — a higher gate point just delays charging slightly during warm-up, erring safe.)
 
 Build rules:
 
 - **Heater from external 5 V only, never the battery** — heating the cell from the cell drains it *and* puts a sustained load on a cold, high-IR cell (the brownout recipe). Wired to the supply, heat exists exactly when charging is possible — which is exactly when the cell must be warm.
 - **Heater element — buy 12 V films and run them at 5 V.** Two **12 V 7 W polyimide (Kapton) film heaters** (25×50 mm, adhesive-backed) **in parallel on the 5 V rail** deliver ≈ 2.4 W total — power scales with V², so each film runs at ~17 % of rating. This is the safest possible configuration: a derated film is **burn-proof by physics** (≈ 25–30 K max rise, even free-standing), whereas a film *rated* for your drive voltage runs at full power and can pass 100 °C at a hotspot during a cold start (owner reviews measure ~180 °C on these films at rated voltage) — the cell-mounted KSD controls *duty cycle*, not film surface temperature. If you do use a rated-voltage film (e.g. 5 V 3 W at 5 V): bond it flat to a metal spreader/holder (thermal mass caps the hotspot), no air-gapped corners, and move the fuse **onto the film** (72–77 °C). A film heater is plain resistive — **not self-limiting** — which is why the thermal fuse below is mandatory either way; a self-limiting PTC plate is an acceptable alternative that earns its fuse for free. And never move the heater branch to a vehicle's 12 V rail — at rated voltage next to a Li-ion cell it's a genuine fire hazard.
-- **One-shot thermal fuse (RY series, 65 °C) in series with the heater, mounted cell-side** — the fail-safe for the one runaway scenario: KSD contacts welding shut. 65 °C by the cell pops before the cell reaches harm territory (cells must never exceed ~60 °C, nor charge above 45 °C). If you mount the fuse directly on the film's hotspot instead, use 72–77 °C to avoid nuisance trips. **Crimp the fuse leads, don't solder** (or heat-sink the lead with pliers while soldering) — the element is a low-melting alloy and soldering heat kills more of these than service does.
+- **One-shot thermal fuse (RY-type, 65–70 °C) in series with the heater, mounted cell-side** — the fail-safe for the one runaway scenario: KSD contacts welding shut. 65–70 °C by the cell pops before the cell reaches harm territory (cells must never exceed ~60 °C, nor charge above 45 °C); with the derated films the normal peak is ~45–55 °C, so ~15 K of nuisance margin remains. If you mount the fuse directly on a film's hotspot instead, use 72–77 °C to avoid nuisance trips. **Crimp the fuse leads, don't solder** (or heat-sink the lead with pliers while soldering) — the element is a low-melting alloy and soldering heat kills more of these than service does.
 - **Sensor placement is the control design**: the **KSD disc goes on the cell** (the variable being regulated), *not* on the heater — mounted on the film it would open seconds after power-on, regulating the heater's own skin at 15 °C while the cell stays frozen. The fuse is the component that lives at the heater. Disc = regulation, fuse = runaway; don't swap their homes.
 - **Heater taps the 5 V *upstream* of the charge-cutoff switch** (as drawn) — downstream, it would lose power exactly when it's needed.
 - **Mind the KSD9700 hysteresis**: these discs re-close 5–15 °C below their open point, so a 10 °C NC part may not re-close until ~0 °C. Pick **15–20 °C NC** for the heater so the band stays comfortably above freezing.
@@ -308,10 +308,10 @@ Parts list (everything under ~€10 total):
 | Part | Spec | Role |
 |---|---|---|
 | PSU | 5 V / ≥12 W (2.4 A), wired to VIN, run ≤10 cm | powers board + charging + heater |
-| KSD9700 **NC ~15 °C** | bimetal disc, ≥1 A, bonded to the cell | heater thermostat (on below ~15 °C, re-closes well above 0) |
-| KSD9700 **NO ~+5 °C** | bimetal disc, ≥1 A, bonded to the cell | charge gate (blocks VIN below ~+5 °C) |
+| KSD9700 **NC 25 °C** | bimetal disc, ≥1 A, bonded to the cell | heater thermostat (on below ~25 °C, re-closes ~10–15 °C lower) |
+| KSD9700 **NO 15 °C** | bimetal disc, ≥1 A, bonded to the cell | charge gate (blocks VIN below ~15 °C — errs safe vs the 0 °C limit) |
 | PI film heater ×2 | **12 V 7 W rated**, ~25×50 mm, adhesive — wired **in parallel at 5 V** ≈ 2.4 W | heat source, burn-proof via derating (never feed these 12 V) |
-| RY thermal fuse | **65 °C**, one-shot, crimped, cell-side | fail-safe if the heater disc welds shut |
+| Thermal fuse | **65–70 °C**, one-shot, crimped, cell-side | fail-safe if the heater disc welds shut |
 | Insulation | a few mm of foam around the battery box | makes 3 W enough for deep winter |
 
 ## Production deployment (Traefik)
