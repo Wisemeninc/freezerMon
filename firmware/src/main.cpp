@@ -33,7 +33,7 @@
 #include "deviceid.h"            // deviceNameValid(), chipSeedName() — host-testable
 #include "geo.h"                 // geoDistM() — movement detection, host-testable
 
-#define FW_VERSION "2.59"
+#define FW_VERSION "2.60"
 
 #define SerialMon Serial
 #define SerialAT  Serial1
@@ -85,6 +85,7 @@ RTC_DATA_ATTR float    anchorLat = 0, anchorLon = 0;
 RTC_DATA_ATTR uint8_t  movingActive = 0;        // in telemetry as `moving`; drives fast cadence
 RTC_DATA_ATTR uint8_t  stillStreak = 0;         // consecutive near-still fixes while moving
 RTC_DATA_ATTR uint8_t  moveAlertPending = 0;    // `moving` alert queued until MQTT is next up
+RTC_DATA_ATTR uint8_t  coldChargeActive = 0;    // cold-charge condition latched (one-shot alert + re-arm hysteresis)
 
 uint32_t awakeStart = 0;
 
@@ -1227,6 +1228,27 @@ static bool maybeGps(uint32_t fixTimeoutS) {
   return gotFix;
 }
 
+// Li-ion must not be charged below ~0 C (lithium plating -> permanent damage).
+// The board's CN3065 charger HAS a TEMP protection input but it is wired to GND
+// (disabled) on the T-A7608, so detect the condition instead: external power
+// present (the charger has input) while the battery probe — the second DS18B20,
+// t_amb, strapped to the cell — reads below COLD_CHARGE_C. Returns true exactly
+// once per episode (edge-triggered); clears with +2 C hysteresis so it re-arms.
+// No probe fitted (t_amb NAN) -> never fires.
+static bool coldChargeCheck(const Sample &s) {
+  if (isnan(s.tAmb)) return false;
+  if (s.extPower && s.tAmb < COLD_CHARGE_C) {
+    if (!coldChargeActive) {
+      coldChargeActive = 1;
+      logLine("[batt] COLD CHARGE - %.1fC on external power, unplug or warm the cell", s.tAmb);
+      return true;
+    }
+  } else if (!s.extPower || s.tAmb > COLD_CHARGE_C + 2.0f) {
+    coldChargeActive = 0;
+  }
+  return false;
+}
+
 static bool publishSample(const Sample &s, uint32_t nowEpoch, bool buffered,
                           const char *wakeReason, int16_t rssiDbm) {
   JsonDocument doc;
@@ -1416,6 +1438,7 @@ void setup() {
         if (s.alarm && !alarmWasActive) publishAlert(s, now, "temp_breach");
         if (doorWake && s.doorOpen)     publishAlert(s, now, "door_open");
         if (s.vbatMv > 0 && s.vbatMv < BATT_LOW_MV) publishAlert(s, now, "batt_low");
+        if (coldChargeCheck(s))         publishAlert(s, now, "cold_charge");
 
         // OTA check: the retained cmd (if any) arrives within a moment of subscribing
         char cmdTopic[64];
@@ -1590,6 +1613,7 @@ void loop() {
             publishSample(s, now, false, doorChanged ? "door" : "powered", rssiDbm);
   if (doorChanged && s.doorOpen) publishAlert(s, now, "door_open");
   if (s.alarm && !prevAlarm)     publishAlert(s, now, "temp_breach");
+  if (coldChargeCheck(s))        publishAlert(s, now, "cold_charge");
   prevAlarm = s.alarm;
   lastDoor = door;
   lastReportMs = millis();

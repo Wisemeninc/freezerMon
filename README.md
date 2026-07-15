@@ -26,7 +26,9 @@ Two operating regimes: on **battery** the device deep-sleeps between reports (de
 | `moving` | 1 = unit displaced > `MOVE_ALARM_M` from its parked position (GPS-based) |
 | `buffered` | 1 = backfilled sample from an offline gap |
 
-Alerts (`freezer/<id>/alert`): `temp_breach`, `door_open`, `batt_low`, `moving`.
+Alerts (`freezer/<id>/alert`): `temp_breach`, `door_open`, `batt_low`, `moving`, `cold_charge`.
+
+**Cold-charge protection (`cold_charge`)**: Li-ion cells must not be charged below ~0 °C (lithium plating). The board's CN3065 charger has a TEMP protection input, **but it ships wired to GND — disabled** — so the firmware detects the condition instead: if external power is present while the second DS18B20 (`t_amb`, strap it to the cell) reads below `COLD_CHARGE_C` (0 °C), a one-shot `cold_charge` alert fires (re-arms with +2 °C hysteresis) — unplug or warm the cell. This is detection, not enforcement; for autonomous cutoff put an NTC-equipped charger in the supply path (or lift the CN3065 TEMP pin and fit the NTC divider). No second probe fitted → the check is inert.
 
 **Movement detection** (GPS-based — the board has no accelerometer): the unit anchors its position while parked; any fix more than `MOVE_ALARM_M` (150 m, above GPS scatter) from the anchor raises a one-shot `moving` alert and switches to **fast reporting (60 s) with a GPS fix every wake**, so the map tracks the unit live. After `MOVE_STOP_CYCLES` consecutive near-still fixes it re-anchors at the new spot and drops back to the normal cadence. Detection latency while parked is bounded by the GPS cadence (a fix every `GPS_EVERY_N_REPORTS` wakes, ~30 min) — a battery-friendly trade-off; wire a vibration sensor to a spare interrupt pin if you need instant wake-on-motion.
 No-coverage readings are buffered in RTC memory (24 samples) and backfilled with corrected timestamps on reconnect.

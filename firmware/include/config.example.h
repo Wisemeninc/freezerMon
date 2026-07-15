@@ -36,6 +36,7 @@
 #define REPORT_INTERVAL_FAST_S  60               // while alarm active or door open
 #define GPS_EVERY_N_REPORTS     6                // GPS fix every Nth wake (~30 min)
 #define GPS_FIX_TIMEOUT_S       90               // give up on fix after this (periodic wakes)
+#define COLD_CHARGE_C           0.0f             // alert if external power is present while the battery probe (t_amb, strap to the cell) is below this — Li-ion must not charge below ~0C and the board's CN3065 TEMP protection is disabled (pin grounded)
 #define MOVE_ALARM_M            150              // GPS displacement from the parked anchor that raises the `moving` alert (> GPS scatter)
 #define MOVE_STOP_M             50               // consecutive fixes closer than this = standing still
 #define MOVE_STOP_CYCLES        3                // still fixes needed to re-anchor + clear moving state
