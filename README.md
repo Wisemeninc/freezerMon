@@ -28,7 +28,7 @@ Two operating regimes: on **battery** the device deep-sleeps between reports (de
 
 Alerts (`freezer/<id>/alert`): `temp_breach`, `door_open`, `batt_low`, `moving`, `cold_charge`.
 
-**Cold-charge protection (`cold_charge`)**: Li-ion cells must not be charged below ~0 °C (lithium plating). The board's CN3065 charger has a TEMP protection input, **but it ships wired to GND — disabled** — so the firmware detects the condition instead: if external power is present while the second DS18B20 (`t_amb`, strap it to the cell) reads below `COLD_CHARGE_C` (0 °C), a one-shot `cold_charge` alert fires (re-arms with +2 °C hysteresis) — unplug or warm the cell. This is detection, not enforcement; for autonomous cutoff see [the CN3065 TEMP hardware mod](#hardware-fix-temperature-protected-charging-cn3065-temp-mod). No second probe fitted → the check is inert.
+**Cold-charge protection (`cold_charge`)**: Li-ion cells must not be charged below ~0 °C (lithium plating). The board's CN3065 charger has a TEMP protection input, **but it ships wired to GND — disabled** — so the firmware detects the condition instead: if external power is present while the second DS18B20 (`t_amb`, strap it to the cell) reads below `COLD_CHARGE_C` (0 °C), a one-shot `cold_charge` alert fires (re-arms with +2 °C hysteresis) — unplug or warm the cell. This is detection, not enforcement; for autonomous cutoff see [Hardware fix: temperature-protected charging](#hardware-fix-temperature-protected-charging) — the recommended no-solder option is a KSD9700 thermal switch in the charge-input lead. No second probe fitted → the check is inert.
 
 **Movement detection** (GPS-based — the board has no accelerometer): the unit anchors its position while parked; any fix more than `MOVE_ALARM_M` (150 m, above GPS scatter) from the anchor raises a one-shot `moving` alert and switches to **fast reporting (60 s) with a GPS fix every wake**, so the map tracks the unit live. After `MOVE_STOP_CYCLES` consecutive near-still fixes it re-anchors at the new spot and drops back to the normal cadence. Detection latency while parked is bounded by the GPS cadence (a fix every `GPS_EVERY_N_REPORTS` wakes, ~30 min) — a battery-friendly trade-off; wire a vibration sensor to a spare interrupt pin if you need instant wake-on-motion.
 No-coverage readings are buffered in RTC memory (24 samples) and backfilled with corrected timestamps on reconnect.
@@ -234,11 +234,29 @@ Hardware mitigations, in order of effectiveness:
 
 Related: the board browns out on a PC USB port at power-on regardless of battery temperature — it needs a **≥2 A** supply or the 18650 for the modem's startup surge.
 
-### Hardware fix: temperature-protected charging (CN3065 TEMP mod)
+### Hardware fix: temperature-protected charging
 
-Li-ion cells must never be **charged below ~0 °C** (lithium plating → permanent capacity loss, eventual safety risk). The board's charger — a **CN3065** ([datasheet](https://raw.githubusercontent.com/SeeedDocument/Lipo_Rider_Pro/master/res/DSE-CN3065.pdf)) — has exactly the protection input needed: the **TEMP pin suspends charging whenever V(TEMP) < 46 % of VIN** and resumes automatically above it. But on this board **TEMP (pin 1) is wired straight to GND, which disables the function** — verified in the [T-A7608X schematic](https://github.com/Xinyuan-LilyGO/LilyGO-T-A76XX/blob/main/schematic/esp32/T-A7608X-V1.0.pdf) (page 3, charger block `U7`; the datasheet's application circuit shows the intended NTC wiring).
+Li-ion cells must never be **charged below ~0 °C** (lithium plating → permanent capacity loss, eventual safety risk). The board's charger — a **CN3065** ([datasheet](https://raw.githubusercontent.com/SeeedDocument/Lipo_Rider_Pro/master/res/DSE-CN3065.pdf)) — has exactly the protection input needed: the **TEMP pin suspends charging whenever V(TEMP) < 46 % of VIN** and resumes automatically above it. But on this board **TEMP (pin 1) is wired straight to GND, which disables the function** — verified in the [T-A7608X schematic](https://github.com/Xinyuan-LilyGO/LilyGO-T-A76XX/blob/main/schematic/esp32/T-A7608X-V1.0.pdf) (page 3, charger block `U7`).
 
-The mod — re-enable it as a **cold cutoff**:
+#### Option A (recommended — no board soldering): thermal switch in the charge input
+
+Splice a **KSD9700-type bimetal thermal switch** into the 5 V supply lead (USB/solar → board VIN) and thermally bond the switch to the **18650 cell** (not the air):
+
+```
+USB / solar 5 V ──[ KSD9700 on the cell — opens < ~+5 °C ]──► board VIN
+18650 ───────────────(directly in its holder, unswitched)──► board
+```
+
+- Cold cell → switch opens → the CN3065 has no input → **charging physically impossible**; the battery keeps powering the device uninterrupted (discharging in the cold is allowed — and is what keeps the monitor alive).
+- Warm again → power returns by itself. Fully autonomous: works even if the firmware is dead — the right property for a safety function.
+- Part: **normally-open, closes above ~+5 °C** variant (KSD9700 is sold in both polarities and many setpoints), rated ≥ 1 A. The +5 °C setpoint gives margin over the 0 °C hard limit including mounting error.
+- Trade-off: while cold, *external power* is gone too (charge and load share the VIN path) — the unit simply runs its normal battery regime.
+
+> ⚠️ **Do NOT put the switch between the battery and the board.** That kills the whole monitor whenever the cell is cold (it's charging that's forbidden, not discharging), and its contact resistance sits in series with the modem's 2 A bursts — the exact path where marginal resistance causes the brownout loop described above.
+
+#### Option B (board-level, delicate): re-enable the CN3065's own TEMP protection
+
+Only if you're comfortable lifting an SMD pin — re-enable the chip's protection as a **cold cutoff**:
 
 1. **Lift TEMP (pin 1) of the CN3065** off its GND pad (fine iron or hot air — this is the only delicate step), or cut its trace to GND.
 2. Wire this divider, with the **NTC strapped to the 18650 cell** (not the air):
