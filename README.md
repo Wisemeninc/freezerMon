@@ -28,7 +28,7 @@ Two operating regimes: on **battery** the device deep-sleeps between reports (de
 
 Alerts (`freezer/<id>/alert`): `temp_breach`, `door_open`, `batt_low`, `moving`, `cold_charge`.
 
-**Cold-charge protection (`cold_charge`)**: Li-ion cells must not be charged below ~0 °C (lithium plating). The board's CN3065 charger has a TEMP protection input, **but it ships wired to GND — disabled** — so the firmware detects the condition instead: if external power is present while the second DS18B20 (`t_amb`, strap it to the cell) reads below `COLD_CHARGE_C` (0 °C), a one-shot `cold_charge` alert fires (re-arms with +2 °C hysteresis) — unplug or warm the cell. This is detection, not enforcement; for autonomous cutoff put an NTC-equipped charger in the supply path (or lift the CN3065 TEMP pin and fit the NTC divider). No second probe fitted → the check is inert.
+**Cold-charge protection (`cold_charge`)**: Li-ion cells must not be charged below ~0 °C (lithium plating). The board's CN3065 charger has a TEMP protection input, **but it ships wired to GND — disabled** — so the firmware detects the condition instead: if external power is present while the second DS18B20 (`t_amb`, strap it to the cell) reads below `COLD_CHARGE_C` (0 °C), a one-shot `cold_charge` alert fires (re-arms with +2 °C hysteresis) — unplug or warm the cell. This is detection, not enforcement; for autonomous cutoff see [the CN3065 TEMP hardware mod](#hardware-fix-temperature-protected-charging-cn3065-temp-mod). No second probe fitted → the check is inert.
 
 **Movement detection** (GPS-based — the board has no accelerometer): the unit anchors its position while parked; any fix more than `MOVE_ALARM_M` (150 m, above GPS scatter) from the anchor raises a one-shot `moving` alert and switches to **fast reporting (60 s) with a GPS fix every wake**, so the map tracks the unit live. After `MOVE_STOP_CYCLES` consecutive near-still fixes it re-anchors at the new spot and drops back to the normal cadence. Detection latency while parked is bounded by the GPS cadence (a fix every `GPS_EVERY_N_REPORTS` wakes, ~30 min) — a battery-friendly trade-off; wire a vibration sensor to a spare interrupt pin if you need instant wake-on-motion.
 No-coverage readings are buffered in RTC memory (24 samples) and backfilled with corrected timestamps on reconnect.
@@ -231,6 +231,31 @@ Mitigations, in order of effectiveness:
 4. A healthy, genuine cell: high-drain rated (≥5 A), not an aged or counterfeit one.
 
 Related: the board browns out on a PC USB port at power-on regardless of battery temperature — it needs a **≥2 A** supply or the 18650 for the modem's startup surge.
+
+### Hardware fix: temperature-protected charging (CN3065 TEMP mod)
+
+Li-ion cells must never be **charged below ~0 °C** (lithium plating → permanent capacity loss, eventual safety risk). The board's charger — a **CN3065** ([datasheet](https://raw.githubusercontent.com/SeeedDocument/Lipo_Rider_Pro/master/res/DSE-CN3065.pdf)) — has exactly the protection input needed: the **TEMP pin suspends charging whenever V(TEMP) < 46 % of VIN** and resumes automatically above it. But on this board **TEMP (pin 1) is wired straight to GND, which disables the function** — verified in the [T-A7608X schematic](https://github.com/Xinyuan-LilyGO/LilyGO-T-A76XX/blob/main/schematic/esp32/T-A7608X-V1.0.pdf) (page 3, charger block `U7`; the datasheet's application circuit shows the intended NTC wiring).
+
+The mod — re-enable it as a **cold cutoff**:
+
+1. **Lift TEMP (pin 1) of the CN3065** off its GND pad (fine iron or hot air — this is the only delicate step), or cut its trace to GND.
+2. Wire this divider, with the **NTC strapped to the 18650 cell** (not the air):
+
+```
+  CN3065 VIN (5 V / solar side)
+        │
+     [ NTC 10 kΩ B3950 ]   ← thermally bonded to the cell
+        │
+        ├──────── TEMP (pin 1, lifted from GND)
+        │
+     [ R1 22 kΩ ]
+        │
+       GND
+```
+
+3. How it behaves: cold cell → NTC resistance rises → V(TEMP) falls below 46 %·VIN → **charging suspends**; the cell warms → resumes on its own. With 10 k B3950 + 22 k, the cutoff lands at ≈ **+1 °C**. The divider is ratiometric to VIN, so it stays correct as a solar input sags and recovers. Tune R1 for a different cutoff: `R1 = R_NTC(at cutoff) × 0.46/0.54`.
+
+Notes: in this orientation the single threshold guards the **cold** end only (the stock hot-side protection was disabled anyway); pair it with the firmware `cold_charge` alert for visibility. If SMD pin-lifting isn't your thing, the no-surgery alternative is an inline charger module with its own NTC input ahead of the board, or simply keeping the cell out of sub-zero placement.
 
 ## Production deployment (Traefik)
 
