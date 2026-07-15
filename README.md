@@ -236,6 +236,8 @@ Related: the board browns out on a PC USB port at power-on regardless of battery
 
 ### Hardware fix: temperature-protected charging
 
+> ⚠️ **Disclaimer:** the hardware options below (charge gating, heaters, thermal fuses) are a record of **one specific build — not a recommendation or professional advice**. Li-ion batteries and heating elements are safety-critical: component values, setpoints and power figures here apply to *this* enclosure, cell, climate and supply, and reviews/datasheets vary between suppliers. **Do your own calculations, read the actual datasheets of the parts you buy, and verify thermal behavior on the bench before deploying.** You assume all risk (see [LICENSE](LICENSE) — the software and this documentation come with no warranty of any kind).
+
 Li-ion cells must never be **charged below ~0 °C** (lithium plating → permanent capacity loss, eventual safety risk). The board's charger — a **CN3065** ([datasheet](https://raw.githubusercontent.com/SeeedDocument/Lipo_Rider_Pro/master/res/DSE-CN3065.pdf)) — has exactly the protection input needed: the **TEMP pin suspends charging whenever V(TEMP) < 46 % of VIN** and resumes automatically above it. But on this board **TEMP (pin 1) is wired straight to GND, which disables the function** — verified in the [T-A7608X schematic](https://github.com/Xinyuan-LilyGO/LilyGO-T-A76XX/blob/main/schematic/esp32/T-A7608X-V1.0.pdf) (page 3, charger block `U7`).
 
 #### Option A (recommended — no board soldering): thermal switch in the charge input
