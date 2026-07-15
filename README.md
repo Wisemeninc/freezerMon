@@ -25,6 +25,10 @@ Two operating regimes: on **battery** the device deep-sleeps between reports (de
 | `alarm` | 1 = temp breach active (N consecutive over-threshold samples) |
 | `moving` | 1 = unit displaced > `MOVE_ALARM_M` from its parked position (GPS-based) |
 | `buffered` | 1 = backfilled sample from an offline gap |
+| `wake` | what woke the device: `timer`, `door`, `power_on` |
+| `rst` | reset reason (`deepsleep` is healthy; `BROWNOUT` flags a marginal supply) |
+| `ph` | how far the *previous* cycle got (NVS breadcrumb, 6 = completed fully) — supply-health forensics |
+| `fw` | firmware version — fleet tracking + OTA confirmation |
 
 Alerts (`freezer/<id>/alert`): `temp_breach`, `door_open`, `batt_low`, `moving`, `cold_charge`.
 
@@ -223,7 +227,14 @@ The A7608's LTE bursts peak around **2 A**. A cold 18650 (this is a *cooling* un
 - telemetry frames arrive with `wake:"power_on"` and `boot:1` **every time** — RTC memory is wiped each reset, so nothing survives between cycles: the boot counter, the temp-alarm breach streak (the alarm can never trigger), the movement anchor, and the offline buffer are all lost each wake;
 - cycles die before publishing at all (irregular gaps in the data).
 
-**The firmware self-heals this loop** (found the hard way): a brownout wipes RTC memory, which *forces* a GPS+AGPS hunt on the next boot — and that GNSS+RF load is exactly what browns the cell out again, forever. So on a `BROWNOUT` reset the firmware sheds the heavy loads for that cycle (no debug AP, no AGPS/GNSS — publish only), reaches deep sleep, and resumes the normal cadence; telemetry carries `rst` (reset reason) and `ph` (how far the previous cycle got) so a recurring pattern is visible remotely.
+**The firmware stays fully functional on a marginal supply** (learned the hard way — the failure mode is a *double boot per wake*: the first modem power-on's inrush browns the cell out, the reboot's second attempt survives on the precharged caps). Defenses, all breadcrumb-driven:
+
+- NVS **phase breadcrumbs** record how far each cycle got; telemetry carries `rst` (reset reason) and `ph` (previous cycle's last phase) so the pattern is visible remotely.
+- On a `BROWNOUT` boot the **debug AP is shed**; **GNSS is shed only if the previous cycle died under RF load** (`ph` 2–5) — a wake-inrush double boot (`ph` 1/6) keeps GPS, since its attach already proved the cell carries the RF load.
+- The **temp-alarm streak, movement anchor, queued alerts and AGPS age are NVS-mirrored** (write-on-change), so alarms, movement detection and alert delivery all work even when RTC is wiped every wake.
+- **AGPS assistance is re-downloaded per modem power cycle** — it lives in the GNSS engine's RAM and dies with the modem rail, so wall-clock caching would silently kill fixes on battery.
+
+Net effect: on a supply that browns out at every wake the unit still publishes, sleeps, alarms, tracks movement and delivers GPS — the hardware mitigations below restore efficiency, not functionality.
 
 Hardware mitigations, in order of effectiveness:
 
