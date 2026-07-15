@@ -34,7 +34,7 @@
 #include "deviceid.h"            // deviceNameValid(), chipSeedName() — host-testable
 #include "geo.h"                 // geoDistM() — movement detection, host-testable
 
-#define FW_VERSION "2.63"
+#define FW_VERSION "2.64"
 
 #define SerialMon Serial
 #define SerialAT  Serial1
@@ -218,6 +218,41 @@ static bool persistDeviceId(const char *name) {
   size_t written = prefs.putString("devid", name);
   prefs.end();
   return written > 0;
+}
+
+// ---------- NVS-backed monitor state ----------
+// The temp-alarm streak, movement anchor and AGPS age lived only in RTC memory,
+// which every brownout wipes — on a marginal supply (the wake-inrush double-boot
+// pattern) that meant the temp alarm could NEVER accumulate its 3 consecutive
+// breaches, movement re-anchored every cycle, and AGPS re-downloaded every wake.
+// Mirror them in NVS: written through on change (NVS skips writes when the value
+// is unchanged, so liberal calls cost no flash wear), loaded back on any boot
+// that wiped RTC. Deep-sleep wakes keep RTC as the live copy.
+static void saveMonState() {
+  Preferences p;
+  p.begin("freezermon", false);
+  p.putUChar("alrm",  alarmActive);
+  p.putUChar("brch",  consecutiveBreaches);
+  p.putFloat("alat",  anchorLat);
+  p.putFloat("alon",  anchorLon);
+  p.putUChar("mov",   movingActive);
+  p.putUChar("still", stillStreak);
+  p.putUChar("mvpd",  moveAlertPending);
+  p.putULong("agps",  lastAgpsEpoch);
+  p.end();
+}
+static void loadMonState() {
+  Preferences p;
+  p.begin("freezermon", true);
+  alarmActive         = p.getUChar("alrm", 0);
+  consecutiveBreaches = p.getUChar("brch", 0);
+  anchorLat           = p.getFloat("alat", 0);
+  anchorLon           = p.getFloat("alon", 0);
+  movingActive        = p.getUChar("mov", 0);
+  stillStreak         = p.getUChar("still", 0);
+  moveAlertPending    = p.getUChar("mvpd", 0);
+  lastAgpsEpoch       = p.getULong("agps", 0);
+  p.end();
 }
 
 // Resolve deviceId once at boot: a valid stored NVS name wins; otherwise seed it
@@ -1121,13 +1156,16 @@ static void stopDebugAp() {
 
 static void evaluateAlarm(Sample &s) {
   if (!isnan(s.tCab) && s.tCab > TEMP_ALARM_C) {
-    if (consecutiveBreaches < 0xFF) consecutiveBreaches++;
+    // cap at the threshold: >= ALARM_CONSECUTIVE means latched, counting higher
+    // adds nothing and would cost an NVS write-through every breaching wake
+    if (consecutiveBreaches < ALARM_CONSECUTIVE) consecutiveBreaches++;
   } else {
     consecutiveBreaches = 0;
     alarmActive = 0;
   }
   if (consecutiveBreaches >= ALARM_CONSECUTIVE) alarmActive = 1;
   s.alarm = alarmActive;
+  saveMonState();                                       // no-op unless something changed
 }
 
 // A76XX firmware families disagree on the CGNSSINFO layout (3 vs 4 SV-count
@@ -1182,8 +1220,9 @@ static bool readGnssFix(float *outLat, float *outLon, int *satsUsed) {
 // fast cadence, GPS every wake); moving -> MOVE_STOP_CYCLES consecutive fixes
 // within MOVE_STOP_M of each other = parked again, re-anchor at the new spot.
 static void updateMovement(float prevLat, float prevLon) {
-  if (anchorLat == 0 && anchorLon == 0) {               // first fix ever / post cold boot
+  if (anchorLat == 0 && anchorLon == 0) {               // first fix ever (NVS mirror also empty)
     anchorLat = lastLat; anchorLon = lastLon;
+    saveMonState();
     return;
   }
   if (!movingActive) {
@@ -1204,6 +1243,7 @@ static void updateMovement(float prevLat, float prevLon) {
       stillStreak = 0;
     }
   }
+  saveMonState();                                       // no-op unless something changed
 }
 
 static bool maybeGps(uint32_t fixTimeoutS) {
@@ -1221,7 +1261,7 @@ static bool maybeGps(uint32_t fixTimeoutS) {
   bool agpsFresh = rtcEpoch && lastAgpsEpoch && (rtcEpoch - lastAgpsEpoch) < AGPS_REFRESH_S;
   if (!agpsFresh) {
     modem.sendAT("+CAGPS");
-    if (modem.waitResponse(20000L) == 1) { lastAgpsEpoch = rtcEpoch; logLine("[gps] AGPS ephemeris loaded"); }
+    if (modem.waitResponse(20000L) == 1) { lastAgpsEpoch = rtcEpoch; saveMonState(); logLine("[gps] AGPS ephemeris loaded"); }
     else                                   logLine("[gps] AGPS load failed - unassisted cold fix");
   }
   float lat, lon;
@@ -1413,6 +1453,10 @@ void setup() {
   logLine("[boot] #%lu fw=%s id=%s wake=%s reset=%s rr0=%d rr1=%d prev_ph=%u",
           bootCount, FW_VERSION, deviceId, wakeReason, resetStr,
           (int)rtc_get_reset_reason(0), (int)rtc_get_reset_reason(1), prevPhase);
+  // RTC survived only if we truly woke from deep sleep; on every other reset
+  // (brownout, sw, power-on) restore the monitor state from its NVS mirror so
+  // the temp-alarm streak, movement anchor and AGPS age survive the wipe.
+  if (rr != ESP_RST_DEEPSLEEP) loadMonState();
 
   // cold boot = installer likely present -> bring up the field-debug AP.
   // EXCEPT after a brownout: the AP's WiFi load stacks onto the already-heavy
@@ -1546,6 +1590,7 @@ void setup() {
         if (moveAlertPending && mqtt.connected()) {
           publishAlert(s, now, "moving");
           moveAlertPending = 0;
+          saveMonState();
         }
       }
     } else {
@@ -1646,6 +1691,7 @@ void loop() {
   if (moveAlertPending && mqtt.connected()) {           // movement detected by that fix
     publishAlert(s, rtcEpoch, "moving");
     moveAlertPending = 0;
+    saveMonState();
   }
   // GNSS-wedge recovery (powered regime only — battery self-heals via the
   // deep-sleep rail drop). A continuously-powered modem never loses the rail,
