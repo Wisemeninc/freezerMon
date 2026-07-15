@@ -34,7 +34,7 @@
 #include "deviceid.h"            // deviceNameValid(), chipSeedName() — host-testable
 #include "geo.h"                 // geoDistM() — movement detection, host-testable
 
-#define FW_VERSION "2.64"
+#define FW_VERSION "2.65"
 
 #define SerialMon Serial
 #define SerialAT  Serial1
@@ -86,6 +86,7 @@ RTC_DATA_ATTR float    anchorLat = 0, anchorLon = 0;
 RTC_DATA_ATTR uint8_t  movingActive = 0;        // in telemetry as `moving`; drives fast cadence
 RTC_DATA_ATTR uint8_t  stillStreak = 0;         // consecutive near-still fixes while moving
 RTC_DATA_ATTR uint8_t  moveAlertPending = 0;    // `moving` alert queued until MQTT is next up
+RTC_DATA_ATTR uint8_t  tempAlertPending = 0;    // `temp_breach` alert queued — the latch can happen on a boot that dies before MQTT (double-boot pattern), so the edge is decoupled from the publish
 RTC_DATA_ATTR uint8_t  coldChargeActive = 0;    // cold-charge condition latched (one-shot alert + re-arm hysteresis)
 
 uint32_t awakeStart = 0;
@@ -238,7 +239,10 @@ static void saveMonState() {
   p.putUChar("mov",   movingActive);
   p.putUChar("still", stillStreak);
   p.putUChar("mvpd",  moveAlertPending);
+  p.putUChar("tpnd",  tempAlertPending);
   p.putULong("agps",  lastAgpsEpoch);
+  p.putFloat("llat",  lastLat);                  // last-known position survives brownouts:
+  p.putFloat("llon",  lastLon);                  // frames keep coords when no fresh fix (indoors)
   p.end();
 }
 static void loadMonState() {
@@ -251,7 +255,10 @@ static void loadMonState() {
   movingActive        = p.getUChar("mov", 0);
   stillStreak         = p.getUChar("still", 0);
   moveAlertPending    = p.getUChar("mvpd", 0);
+  tempAlertPending    = p.getUChar("tpnd", 0);
   lastAgpsEpoch       = p.getULong("agps", 0);
+  lastLat             = p.getFloat("llat", 0);
+  lastLon             = p.getFloat("llon", 0);
   p.end();
 }
 
@@ -1155,6 +1162,7 @@ static void stopDebugAp() {
 }
 
 static void evaluateAlarm(Sample &s) {
+  uint8_t wasActive = alarmActive;
   if (!isnan(s.tCab) && s.tCab > TEMP_ALARM_C) {
     // cap at the threshold: >= ALARM_CONSECUTIVE means latched, counting higher
     // adds nothing and would cost an NVS write-through every breaching wake
@@ -1164,6 +1172,13 @@ static void evaluateAlarm(Sample &s) {
     alarmActive = 0;
   }
   if (consecutiveBreaches >= ALARM_CONSECUTIVE) alarmActive = 1;
+  // Edge -> queue the alert instead of publishing here: in the double-boot
+  // pattern the latch can happen on a boot that dies at modem power-on, and a
+  // "compare against previous state" test on the NEXT boot then sees the alarm
+  // as already-active and swallows the alert (observed live: alarm:1 in
+  // telemetry, alert topic silent). The pending flag survives via NVS and is
+  // published by whichever boot next has MQTT up.
+  if (alarmActive && !wasActive) tempAlertPending = 1;
   s.alarm = alarmActive;
   saveMonState();                                       // no-op unless something changed
 }
@@ -1470,7 +1485,6 @@ void setup() {
 
   Sample s;
   readSensors(s);
-  bool alarmWasActive = alarmActive;
   evaluateAlarm(s);
 
   bool published = false;
@@ -1523,7 +1537,7 @@ void setup() {
         flushBuffer(now, rssiDbm);                      // backfill offline gap first
         published = publishSample(s, now, false, wakeReason, rssiDbm);
 
-        if (s.alarm && !alarmWasActive) publishAlert(s, now, "temp_breach");
+        if (tempAlertPending) { publishAlert(s, now, "temp_breach"); tempAlertPending = 0; saveMonState(); }
         if (doorWake && s.doorOpen)     publishAlert(s, now, "door_open");
         if (s.vbatMv > 0 && s.vbatMv < BATT_LOW_MV) publishAlert(s, now, "batt_low");
         if (coldChargeCheck(s))         publishAlert(s, now, "cold_charge");
@@ -1724,7 +1738,7 @@ void loop() {
   bool ok = mqtt.connected() &&
             publishSample(s, now, false, doorChanged ? "door" : "powered", rssiDbm);
   if (doorChanged && s.doorOpen) publishAlert(s, now, "door_open");
-  if (s.alarm && !prevAlarm)     publishAlert(s, now, "temp_breach");
+  if (tempAlertPending) { publishAlert(s, now, "temp_breach"); tempAlertPending = 0; saveMonState(); }
   if (coldChargeCheck(s))        publishAlert(s, now, "cold_charge");
   prevAlarm = s.alarm;
   lastDoor = door;
