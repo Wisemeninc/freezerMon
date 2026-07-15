@@ -34,7 +34,7 @@
 #include "deviceid.h"            // deviceNameValid(), chipSeedName() — host-testable
 #include "geo.h"                 // geoDistM() — movement detection, host-testable
 
-#define FW_VERSION "2.62"
+#define FW_VERSION "2.63"
 
 #define SerialMon Serial
 #define SerialAT  Serial1
@@ -192,10 +192,13 @@ static void logLine(const char *fmt, ...) {
 // RTC memory does NOT survive a software reset (only deep-sleep wakes), so the
 // breadcrumb lives in NVS: each cycle stamps how far it got; the next boot reads
 // where the previous one died. Phases:
-//   1 = setup started   2 = modem work done (publish/gps complete)
-//   3 = console window done, about to sleep
-//   4 = goToSleep: teardown done (modem off)   5 = immediately before esp_deep_sleep_start
-// prev_ph==5 + reset=sw means the chip died AT deep-sleep entry itself.
+//   1 = setup started (death here = modem power-on inrush brownout)
+//   2 = LTE attached  (death here = RF-load brownout: publish/GNSS)
+//   3 = modem work done (publish/gps complete)
+//   4 = console window done, about to sleep
+//   5 = goToSleep: teardown done (modem off)
+//   6 = immediately before esp_deep_sleep_start (prev_ph==6 = previous cycle
+//       completed fully; a brownout after that is the NEXT wake's inrush)
 static const char *g_resetStr = "?";
 static uint8_t prevPhase = 0;
 static void markPhase(uint8_t ph) {
@@ -257,7 +260,17 @@ static void modemPowerOn() {
   // (external-supply) unit never does — so force it here on every power-on.
   digitalWrite(BOARD_POWERON_PIN, LOW);
   delay(1200);                                    // let the rail fully drain
-  digitalWrite(BOARD_POWERON_PIN, HIGH);          // rail for modem section
+  // Precharge double-tap: slamming the drained rail on in one step draws an
+  // inrush surge that browns out a marginal cell/holder (seen live 2026-07-15:
+  // every wake's FIRST power-on died, the reboot's second attempt survived on
+  // the now-precharged caps). Emulate that deliberately: a short first tap
+  // charges the modem's bulk capacitance, the brief drop bounds the surge, and
+  // the final enable then sees a much smaller di/dt. Costs 250 ms.
+  digitalWrite(BOARD_POWERON_PIN, HIGH);          // tap 1: precharge the bulk caps
+  delay(150);
+  digitalWrite(BOARD_POWERON_PIN, LOW);
+  delay(100);
+  digitalWrite(BOARD_POWERON_PIN, HIGH);          // rail for modem section (caps precharged)
 
   pinMode(MODEM_RESET_PIN, OUTPUT);               // reset pulse (LilyGO reference)
   digitalWrite(MODEM_RESET_PIN, !MODEM_RESET_LEVEL); delay(100);
@@ -1340,7 +1353,7 @@ static void goToSleep(uint32_t seconds) {
   if (modem.isGprsConnected()) modem.gprsDisconnect();
   modem.poweroff();                                     // modem fully off while sleeping
   delay(200);
-  markPhase(4);                                         // teardown done (wifi+mqtt+modem off)
+  markPhase(5);                                         // teardown done (wifi+mqtt+modem off)
 
   // age buffered samples and the epoch estimate by the coming sleep window
   for (uint8_t i = 0; i < rtcBufCount; i++) rtcBuf[i].ageS += seconds;
@@ -1362,7 +1375,7 @@ static void goToSleep(uint32_t seconds) {
   esp_sleep_enable_timer_wakeup((uint64_t)seconds * 1000000ULL);
   logLine("[sleep] %lus, buffered=%u", seconds, rtcBufCount);
   SerialMon.flush();
-  markPhase(5);                                         // next instruction is deep sleep itself
+  markPhase(6);                                         // next instruction is deep sleep itself
   esp_deep_sleep_start();
 }
 
@@ -1421,6 +1434,7 @@ void setup() {
     modemBusy = true;                                   // /lte reports busy during attach
     modemPowerOn();
     if (modemConnect()) {
+      markPhase(2);                                     // attached — later death = RF-load, not inrush
       int csq = modem.getSignalQuality();
       int16_t rssiDbm = (csq >= 0 && csq < 99) ? (int16_t)(-113 + 2 * csq) : -999;  // 99 = unknown
       // GNSS is deferred until AFTER publish: a 90 s no-fix hunt both eats the
@@ -1509,11 +1523,16 @@ void setup() {
       // the GPS cadence counter is set so the next attempt waits a normal
       // interval. One marginal GPS cycle then costs one light recovery cycle
       // instead of looping forever.
+      // Shed GNSS only when the PREVIOUS cycle died under RF load (breadcrumb
+      // ph 2-5: attached but never finished). A brownout with prev_ph==1 or 6
+      // is the wake-time power-on inrush (double-boot pattern) — the attach
+      // just proved the cell carries the RF load fine, so GPS stays enabled;
+      // shedding it there suppressed GPS permanently (the 2.62 regression).
       if (!s.extPower) {
         bool gotFix = false;
-        if (rr == ESP_RST_BROWNOUT) {
+        if (rr == ESP_RST_BROWNOUT && prevPhase >= 2 && prevPhase <= 5) {
           reportsSinceGps = 0;                          // retry GPS only after the normal cadence
-          logLine("[gps] skipped - brownout recovery cycle");
+          logLine("[gps] skipped - prev cycle died under RF load (ph=%u)", prevPhase);
         } else {
           gotFix = maybeGps(coldBoot ? GPS_FIRST_BOOT_TIMEOUT_S : GPS_FIX_TIMEOUT_S);
         }
@@ -1534,7 +1553,7 @@ void setup() {
     }
     modemBusy = false;                                  // console may query the modem again
   }
-  markPhase(2);                                         // modem work done
+  markPhase(3);                                         // modem work done
 
   if (!published) bufferSample(s);                      // data outlives connectivity
 
@@ -1574,7 +1593,7 @@ void setup() {
       delay(50);
     }
   }
-  markPhase(3);                                         // console window done, heading to sleep
+  markPhase(4);                                         // console window done, heading to sleep
 
   uint32_t interval = (s.alarm || s.doorOpen || movingActive) ? REPORT_INTERVAL_FAST_S
                                                               : REPORT_INTERVAL_S;
