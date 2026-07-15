@@ -34,7 +34,7 @@
 #include "deviceid.h"            // deviceNameValid(), chipSeedName() — host-testable
 #include "geo.h"                 // geoDistM() — movement detection, host-testable
 
-#define FW_VERSION "2.61"
+#define FW_VERSION "2.62"
 
 #define SerialMon Serial
 #define SerialAT  Serial1
@@ -1500,8 +1500,23 @@ void setup() {
       // rather than waiting for the next wake to carry lastLat/lastLon. Same
       // ts, so InfluxDB upserts the coords onto this cycle's point. Periodic
       // timer wakes keep the full window and the after-publish-only behaviour.
+      //
+      // EXCEPT on brownout recovery: forensics (fw 2.61, rst/ph telemetry)
+      // proved the reboot loop lives HERE — a brownout wipes RTC, which forces
+      // GPS+AGPS on the next boot, whose GNSS+RF load browns the cell out
+      // again (every cycle died at ph=1, mid-GNSS, after a clean publish).
+      // Shed the GNSS load for the recovery cycle so it reaches deep sleep;
+      // the GPS cadence counter is set so the next attempt waits a normal
+      // interval. One marginal GPS cycle then costs one light recovery cycle
+      // instead of looping forever.
       if (!s.extPower) {
-        bool gotFix = maybeGps(coldBoot ? GPS_FIRST_BOOT_TIMEOUT_S : GPS_FIX_TIMEOUT_S);
+        bool gotFix = false;
+        if (rr == ESP_RST_BROWNOUT) {
+          reportsSinceGps = 0;                          // retry GPS only after the normal cadence
+          logLine("[gps] skipped - brownout recovery cycle");
+        } else {
+          gotFix = maybeGps(coldBoot ? GPS_FIRST_BOOT_TIMEOUT_S : GPS_FIX_TIMEOUT_S);
+        }
         // `now` guard: if the clock never synced this cycle, `ts` is omitted from
         // both frames and the same-ts upsert can't happen -> skip to avoid a
         // duplicate point (the fix still ships next wake via lastLat/lastLon).

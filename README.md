@@ -223,7 +223,9 @@ The A7608's LTE bursts peak around **2 A**. A cold 18650 (this is a *cooling* un
 - telemetry frames arrive with `wake:"power_on"` and `boot:1` **every time** — RTC memory is wiped each reset, so nothing survives between cycles: the boot counter, the temp-alarm breach streak (the alarm can never trigger), the movement anchor, and the offline buffer are all lost each wake;
 - cycles die before publishing at all (irregular gaps in the data).
 
-Mitigations, in order of effectiveness:
+**The firmware self-heals this loop** (found the hard way): a brownout wipes RTC memory, which *forces* a GPS+AGPS hunt on the next boot — and that GNSS+RF load is exactly what browns the cell out again, forever. So on a `BROWNOUT` reset the firmware sheds the heavy loads for that cycle (no debug AP, no AGPS/GNSS — publish only), reaches deep sleep, and resumes the normal cadence; telemetry carries `rst` (reset reason) and `ph` (how far the previous cycle got) so a recurring pattern is visible remotely.
+
+Hardware mitigations, in order of effectiveness:
 
 1. **Bulk capacitance across the battery input** — solder a **1000–2200 µF low-ESR electrolytic** (≥6.3 V; a 105 °C-rated part behaves better in the cold) directly across the 18650 holder pads. This is the classic SIMCom-board fix: it carries the millisecond-scale TX/inrush spikes that trigger most brownouts. It can *not* carry the multi-second attach current — if the cell sags under sustained load, capacitance only delays the reset (that league needs a ~1 F low-ESR supercap/LIC).
 2. **Keep the cell out of the cold zone.** The DS18B20 probe is on a wire — mount the board + battery outside the cooler and only the probe inside. Removes the root cause.
