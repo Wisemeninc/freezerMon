@@ -282,8 +282,8 @@ Notes: in this orientation the single threshold guards the **cold** end only (th
 For a permanently installed unit on a wired 5 V supply, extend Option A into a fully self-managing thermal envelope — **~€2 of bimetal discs, zero code, works even if the firmware is dead**:
 
 ```
-                       ┌─[ KSD9700 NC ~15 °C ]──► PTC heater plate (in the battery box)
-wired 5 V supply ──────┤
+                       ┌─[ KSD9700 NC ~15 °C ]──[ RY thermal fuse 65 °C ]──► PI film heater 5 V 3 W
+wired 5 V supply ──────┤        (on the cell)         (cell side)              (in the battery box)
                        └─[ KSD9700 NO ~+5 °C ]──► board VIN (charge input)
 18650 ─────────(unswitched, in its holder)──────► board
 ```
@@ -293,11 +293,24 @@ Both discs are **thermally bonded to the cell**. Behaviour: compartment cold →
 Build rules:
 
 - **Heater from external 5 V only, never the battery** — heating the cell from the cell drains it *and* puts a sustained load on a cold, high-IR cell (the brownout recipe). Wired to the supply, heat exists exactly when charging is possible — which is exactly when the cell must be warm.
-- **PTC heater element, not bare resistors**, next to a Li-ion cell: PTC plates (5 V, 2–3 W) are self-limiting — resistance climbs as they warm, so they physically cannot run away. 2–3 W holds a 15–25 °C rise in a small insulated compartment.
+- **Heater element**: a **polyimide (Kapton) film heater, 5 V 3 W** (e.g. 25×50 mm, adhesive-backed — the same element commercial battery warmers use) stuck to the cell holder or a small aluminium spreader. 2–3 W holds a 15–25 °C rise in a small insulated compartment. A film heater is plain resistive — **not self-limiting** — which is why the thermal fuse below is mandatory; a self-limiting PTC plate is an acceptable alternative that earns its fuse for free.
+- **One-shot thermal fuse (RY series, 65 °C) in series with the heater, mounted cell-side** — the fail-safe for the one runaway scenario: KSD contacts welding shut. 65 °C by the cell pops before the cell reaches harm territory (cells must never exceed ~60 °C, nor charge above 45 °C). If you mount the fuse directly on the film's hotspot instead, use 72–77 °C to avoid nuisance trips. **Crimp the fuse leads, don't solder** (or heat-sink the lead with pliers while soldering) — the element is a low-melting alloy and soldering heat kills more of these than service does.
+- **Sensor placement is the control design**: the **KSD disc goes on the cell** (the variable being regulated), *not* on the heater — mounted on the film it would open seconds after power-on, regulating the heater's own skin at 15 °C while the cell stays frozen. The fuse is the component that lives at the heater. Disc = regulation, fuse = runaway; don't swap their homes.
 - **Heater taps the 5 V *upstream* of the charge-cutoff switch** (as drawn) — downstream, it would lose power exactly when it's needed.
 - **Mind the KSD9700 hysteresis**: these discs re-close 5–15 °C below their open point, so a 10 °C NC part may not re-close until ~0 °C. Pick **15–20 °C NC** for the heater so the band stays comfortably above freezing.
 - **Supply sizing: 5 V / ≥12 W (2.4 A)**, wired in with a short run (≤10 cm is negligible drop). Sustained worst case ≈ charge (~1 A) + heater (~0.5 A) + board (~0.3 A) ≈ 1.8 A; the modem's 2 A TX bursts ride on the battery+caps, so the PSU only carries the average. Long thin leads are the hidden killer at these currents — 0.3 Ω of cable drops 0.6 V under burst.
 - **Regime note**: a supply wired into VIN drives the `ext_power` sense, so the powered regime engages (no deep sleep, 250 ms door polling, 2-min reports, console always on). When the cold-gate opens VIN, the unit falls back to the battery deep-sleep regime until the heater restores the compartment — expect the reporting cadence to shift with compartment temperature in deep winter. (A micro-USB supply does *not* trigger `ext_power` — it feeds VBUS, bypassing the sense; use VIN for installed units.)
+
+Parts list (everything under ~€10 total):
+
+| Part | Spec | Role |
+|---|---|---|
+| PSU | 5 V / ≥12 W (2.4 A), wired to VIN, run ≤10 cm | powers board + charging + heater |
+| KSD9700 **NC ~15 °C** | bimetal disc, ≥1 A, bonded to the cell | heater thermostat (on below ~15 °C, re-closes well above 0) |
+| KSD9700 **NO ~+5 °C** | bimetal disc, ≥1 A, bonded to the cell | charge gate (blocks VIN below ~+5 °C) |
+| PI film heater | 5 V 3 W, ~25×50 mm, adhesive | heat source in the battery box |
+| RY thermal fuse | **65 °C**, one-shot, crimped, cell-side | fail-safe if the heater disc welds shut |
+| Insulation | a few mm of foam around the battery box | makes 3 W enough for deep winter |
 
 ## Production deployment (Traefik)
 
