@@ -245,13 +245,13 @@ Li-ion cells must never be **charged below ~0 °C** (lithium plating → permane
 Splice a **KSD9700-type bimetal thermal switch** into the 5 V supply lead (USB/solar → board VIN) and thermally bond the switch to the **18650 cell** (not the air):
 
 ```
-USB / solar 5 V ──[ KSD9700 on the cell — opens < ~+5 °C ]──► board VIN
+USB / solar 5 V ──[ KSD9700 NO 15 °C on the cell — re-opens above 0 °C on falling temp ]──► board VIN
 18650 ───────────────(directly in its holder, unswitched)──► board
 ```
 
 - Cold cell → switch opens → the CN3065 has no input → **charging physically impossible**; the battery keeps powering the device uninterrupted (discharging in the cold is allowed — and is what keeps the monitor alive).
 - Warm again → power returns by itself. Fully autonomous: works even if the firmware is dead — the right property for a safety function.
-- Part: **normally-open, closes above ~+5 °C** variant (KSD9700 is sold in both polarities and many setpoints), rated ≥ 1 A. The +5 °C setpoint gives margin over the 0 °C hard limit including mounting error.
+- Part: **normally-open, action point ~15 °C** (KSD9700 is sold in both polarities and many setpoints), rated ≥ 1 A. **The setpoint must be chosen for the *re-opening* (falling-temperature) edge, not the closing one**: these discs re-open 10–20 K *below* their action point, so an NO +5 °C part would keep charging enabled down to roughly −5…−15 °C — violating the 0 °C hard limit. `T_action − ΔT_return ≥ 0 °C` → with typical hysteresis, ~15 °C action is the minimum safe choice (check the return differential on the datasheet of the part you actually buy).
 - Trade-off: while cold, *external power* is gone too (charge and load share the VIN path) — the unit simply runs its normal battery regime.
 
 > ⚠️ **Do NOT put the switch between the battery and the board.** That kills the whole monitor whenever the cell is cold (it's charging that's forbidden, not discharging), and its contact resistance sits in series with the modem's 2 A bursts — the exact path where marginal resistance causes the brownout loop described above.
@@ -290,7 +290,7 @@ wired 5 V supply ──────┤       (on the cell)        (cell side)   
 18650 ────────(unswitched, in its holder)──────► board
 ```
 
-Both discs are **thermally bonded to the cell**. Behaviour: compartment cold → heater on, charging blocked; warming past ~15 °C → charging resumes; past ~25 °C → heater off (re-closes ~10–15 °C lower, so the compartment cycles roughly 10–25 °C). The cycle repeats as ambient demands — battery stays in its safe charge window through a freezing winter, autonomously. (Ideal setpoints would be gate ~+5 °C / heater ~15 °C; the 15/25 pair reflects what's actually stocked in the KSD9700 low-temperature series — a higher gate point just delays charging slightly during warm-up, erring safe.)
+Both discs are **thermally bonded to the cell**. Behaviour: compartment cold → heater on, charging blocked; warming past ~15 °C → charging resumes; past ~25 °C → heater off (re-closes ~10–15 °C lower, so the compartment cycles roughly 10–25 °C). The cycle repeats as ambient demands — battery stays in its safe charge window through a freezing winter, autonomously. (The 15 °C gate is not merely what's stocked — it's required: the gate's protection edge is its *re-opening on falling temperature*, 10–20 K below the action point, so a lower-setpoint NO disc would keep charging enabled below 0 °C. See Option A's part note.)
 
 Build rules:
 
