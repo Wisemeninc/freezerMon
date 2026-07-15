@@ -21,7 +21,7 @@ Two operating regimes: on **battery** the device deep-sleeps between reports (de
 | `ext_power` | 1 = running on external power, 0 = on battery |
 | `vbat_mv`, `vsolar_mv` | battery / VIN-solar millivolts |
 | `rssi_dbm` | LTE signal |
-| `lat`, `lon` | GPS fix (refreshed every Nth report to save power) |
+| `lat`, `lon` | GPS fix — **present only when a fix was obtained that wake** (attempted every Nth report to save power). A missing coordinate means "no fix", never a replayed old position; last-known location is whatever the DB holds. |
 | `alarm` | 1 = temp breach active (N consecutive over-threshold samples) |
 | `moving` | 1 = unit displaced > `MOVE_ALARM_M` from its parked position (GPS-based) |
 | `buffered` | 1 = backfilled sample from an offline gap |

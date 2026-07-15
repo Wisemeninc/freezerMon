@@ -34,7 +34,7 @@
 #include "deviceid.h"            // deviceNameValid(), chipSeedName() — host-testable
 #include "geo.h"                 // geoDistM() — movement detection, host-testable
 
-#define FW_VERSION "2.65"
+#define FW_VERSION "2.66"
 
 #define SerialMon Serial
 #define SerialAT  Serial1
@@ -76,7 +76,8 @@ RTC_DATA_ATTR uint8_t  alarmActive = 0;
 RTC_DATA_ATTR uint32_t bootCount = 0;
 RTC_DATA_ATTR uint8_t  reportsSinceGps = 0xFF;  // force fix on first boot
 RTC_DATA_ATTR uint8_t  gnssZeroSatStreak = 0;   // GNSS-wedge watchdog: consecutive attempts tracking 0 sats
-RTC_DATA_ATTR float    lastLat = 0, lastLon = 0;
+RTC_DATA_ATTR float    lastLat = 0, lastLon = 0; // most recent fix — movement baseline; NOT auto-published (see gpsFreshThisWake)
+static bool gpsFreshThisWake = false;            // set only by a successful fix THIS wake — a published coordinate is a measurement, not a memory
 RTC_DATA_ATTR uint32_t rtcEpoch = 0;            // best-known epoch, aged across sleeps
 RTC_DATA_ATTR uint32_t lastAgpsEpoch = 0;       // when AGPS ephemeris was last downloaded (validity ~hours)
 // movement detection: position is anchored while parked; a fix > MOVE_ALARM_M
@@ -241,8 +242,6 @@ static void saveMonState() {
   p.putUChar("mvpd",  moveAlertPending);
   p.putUChar("tpnd",  tempAlertPending);
   p.putULong("agps",  lastAgpsEpoch);
-  p.putFloat("llat",  lastLat);                  // last-known position survives brownouts:
-  p.putFloat("llon",  lastLon);                  // frames keep coords when no fresh fix (indoors)
   p.end();
 }
 static void loadMonState() {
@@ -257,8 +256,6 @@ static void loadMonState() {
   moveAlertPending    = p.getUChar("mvpd", 0);
   tempAlertPending    = p.getUChar("tpnd", 0);
   lastAgpsEpoch       = p.getULong("agps", 0);
-  lastLat             = p.getFloat("llat", 0);
-  lastLon             = p.getFloat("llon", 0);
   p.end();
 }
 
@@ -1294,7 +1291,7 @@ static bool maybeGps(uint32_t fixTimeoutS) {
     }
     delay(2000);
   }
-  if (gotFix) updateMovement(prevLat, prevLon);
+  if (gotFix) { gpsFreshThisWake = true; updateMovement(prevLat, prevLon); }
   // GNSS-wedge watchdog: an engine that is powered but tracks 0 satellites the
   // whole window is stuck (only a supply cut recovers it). Seeing any sat —
   // even without a full fix — means it's alive, just acquiring.
@@ -1347,8 +1344,13 @@ static bool publishSample(const Sample &s, uint32_t nowEpoch, bool buffered,
   doc["vsolar_mv"] = s.vsolarMv;
   if (rssiDbm > -900) doc["rssi_dbm"] = rssiDbm;
   doc["ext_power"] = s.extPower;
-  // range guard: a misparse (or stale RTC garbage from one) must never map the unit to the Pacific
-  if ((lastLat != 0 || lastLon != 0) && fabsf(lastLat) <= 90.0f && fabsf(lastLon) <= 180.0f) {
+  // Coords are published ONLY when a fix was obtained this wake — a stale
+  // coordinate would mask "cannot get a fix", and absence of data IS the
+  // signal (Peter's rule). Last-known position lives in the DB history, not
+  // fabricated into current frames. Range guard: a misparse must never map
+  // the unit to the Pacific.
+  if (gpsFreshThisWake &&
+      (lastLat != 0 || lastLon != 0) && fabsf(lastLat) <= 90.0f && fabsf(lastLon) <= 180.0f) {
     doc["lat"] = lastLat;
     doc["lon"] = lastLon;
   }
@@ -1701,6 +1703,7 @@ void loop() {
   Sample s;
   readSensors(s);
   evaluateAlarm(s);
+  gpsFreshThisWake = false;                             // powered loop never reboots — freshness is per report cycle
   maybeGps(GPS_FIX_TIMEOUT_S);
   if (moveAlertPending && mqtt.connected()) {           // movement detected by that fix
     publishAlert(s, rtcEpoch, "moving");
