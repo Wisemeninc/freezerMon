@@ -33,7 +33,7 @@
 #include "deviceid.h"            // deviceNameValid(), chipSeedName() — host-testable
 #include "geo.h"                 // geoDistM() — movement detection, host-testable
 
-#define FW_VERSION "2.58"
+#define FW_VERSION "2.59"
 
 #define SerialMon Serial
 #define SerialAT  Serial1
@@ -1349,8 +1349,15 @@ void setup() {
       rr == ESP_RST_SW        ? "sw"        : "other";
   logLine("[boot] #%lu fw=%s id=%s wake=%s reset=%s", bootCount, FW_VERSION, deviceId, wakeReason, resetStr);
 
-  // cold boot = installer likely present -> bring up the field-debug AP
-  if (coldBoot) startDebugAp();
+  // cold boot = installer likely present -> bring up the field-debug AP.
+  // EXCEPT after a brownout: the AP's WiFi load stacks onto the already-heavy
+  // cold-boot cycle (AGPS + GPS hunt + LTE attach + double publish) and can
+  // re-trigger the very sag that caused the reset — a self-sustaining reboot
+  // loop (seen live 2026-07-14: boot:1/power_on every cycle for an hour).
+  // Shedding the AP makes the recovery cycle lighter so the loop can break;
+  // a healthy cold boot (power-on/reset button) still gets the console.
+  if (coldBoot && rr != ESP_RST_BROWNOUT) startDebugAp();
+  else if (coldBoot) logLine("[boot] debug AP skipped - brownout recovery cycle");
 
   Sample s;
   readSensors(s);
