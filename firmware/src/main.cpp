@@ -34,7 +34,7 @@
 #include "deviceid.h"            // deviceNameValid(), chipSeedName() — host-testable
 #include "geo.h"                 // geoDistM() — movement detection, host-testable
 
-#define FW_VERSION "2.66"
+#define FW_VERSION "2.67"
 
 #define SerialMon Serial
 #define SerialAT  Serial1
@@ -78,6 +78,7 @@ RTC_DATA_ATTR uint8_t  reportsSinceGps = 0xFF;  // force fix on first boot
 RTC_DATA_ATTR uint8_t  gnssZeroSatStreak = 0;   // GNSS-wedge watchdog: consecutive attempts tracking 0 sats
 RTC_DATA_ATTR float    lastLat = 0, lastLon = 0; // most recent fix — movement baseline; NOT auto-published (see gpsFreshThisWake)
 static bool gpsFreshThisWake = false;            // set only by a successful fix THIS wake — a published coordinate is a measurement, not a memory
+static bool agpsLoaded = false;                  // ephemeris lives in GNSS-engine RAM: false after every modem power cycle
 RTC_DATA_ATTR uint32_t rtcEpoch = 0;            // best-known epoch, aged across sleeps
 RTC_DATA_ATTR uint32_t lastAgpsEpoch = 0;       // when AGPS ephemeris was last downloaded (validity ~hours)
 // movement detection: position is anchored while parked; a fix > MOVE_ALARM_M
@@ -310,6 +311,7 @@ static void modemPowerOn() {
   digitalWrite(BOARD_POWERON_PIN, LOW);
   delay(100);
   digitalWrite(BOARD_POWERON_PIN, HIGH);          // rail for modem section (caps precharged)
+  agpsLoaded = false;                             // rail was cycled -> GNSS-engine RAM (and any AGPS data in it) is gone
 
   pinMode(MODEM_RESET_PIN, OUTPUT);               // reset pulse (LilyGO reference)
   digitalWrite(MODEM_RESET_PIN, !MODEM_RESET_LEVEL); delay(100);
@@ -1270,10 +1272,17 @@ static bool maybeGps(uint32_t fixTimeoutS) {
   // attached) data bearer so a cold start fixes in seconds instead of timing out at 90 s.
   // AGPS data stays valid a few hours → refresh at most every ~2 h to spare the SIM.
   // Best-effort: on failure we fall back to an unassisted cold fix, so it can only help.
-  bool agpsFresh = rtcEpoch && lastAgpsEpoch && (rtcEpoch - lastAgpsEpoch) < AGPS_REFRESH_S;
+  // AGPS validity tracks MODEM POWER CYCLES, not wall-clock time: +CAGPS loads
+  // ephemeris into the GNSS engine's RAM, which dies with the modem rail — on
+  // battery that's every deep sleep. The NVS-persisted timestamp alone (2.64)
+  // skipped the re-download and left the engine cold-starting unassisted in a
+  // 30 s window: zero fixes from a spot that fixed every wake the day before.
+  // agpsLoaded is cleared by modemPowerOn(); the 2 h wall-clock cap only
+  // matters in the powered regime, where the modem stays up between cycles.
+  bool agpsFresh = agpsLoaded && rtcEpoch && lastAgpsEpoch && (rtcEpoch - lastAgpsEpoch) < AGPS_REFRESH_S;
   if (!agpsFresh) {
     modem.sendAT("+CAGPS");
-    if (modem.waitResponse(20000L) == 1) { lastAgpsEpoch = rtcEpoch; saveMonState(); logLine("[gps] AGPS ephemeris loaded"); }
+    if (modem.waitResponse(20000L) == 1) { agpsLoaded = true; lastAgpsEpoch = rtcEpoch; saveMonState(); logLine("[gps] AGPS ephemeris loaded"); }
     else                                   logLine("[gps] AGPS load failed - unassisted cold fix");
   }
   float lat, lon;
