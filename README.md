@@ -201,6 +201,35 @@ Full model and the independent-review findings are in [docs/HARDENING.md](docs/H
 
 Deep sleep with the modem fully off dominates the budget. At a 5-min cadence expect roughly 2–4 weeks on a single 18650 (LTE attach ≈ 10–30 s at ~100+ mA per cycle is the main cost; GPS every 6th cycle). On external power the unit simply reports faster.
 
+### The 18650: voltage ladder
+
+What the firmware does as `vbat_mv` falls:
+
+| vbat | Behaviour |
+|---|---|
+| ~4200–3700 mV | Normal operation |
+| < 3700 mV (`OTA_MIN_VBAT_MV`) | OTA installs **deferred** (no flash writes on a sagging supply); telemetry unaffected |
+| < 3400 mV (`BATT_LOW_MV`) | `batt_low` alert on every report + the Grafana battery rule fires — recharge now |
+| ~3300–3400 mV *under load* | Modem TX bursts sag the rail → **brownout resets** (see below); reporting gets ragged and lossy |
+| ~2500–3000 mV | Cell protection (or the ESP32's own brownout detector) cuts — unit is silent; the Grafana *no-data-15-min* rule is your notification |
+
+### Brownouts on battery (cold or tired cells)
+
+The A7608's LTE bursts peak around **2 A**. A cold 18650 (this is a *cooling* unit — a cell living in the cold zone at 2–5 °C has markedly higher internal resistance) or a worn one can sag below the ESP32's brownout threshold under those bursts **even when its resting voltage looks healthy (4+ V)**. Symptoms, from mildest to worst:
+
+- `/log` shows `reset=BROWNOUT` on boot lines;
+- telemetry frames arrive with `wake:"power_on"` and `boot:1` **every time** — RTC memory is wiped each reset, so nothing survives between cycles: the boot counter, the temp-alarm breach streak (the alarm can never trigger), the movement anchor, and the offline buffer are all lost each wake;
+- cycles die before publishing at all (irregular gaps in the data).
+
+Mitigations, in order of effectiveness:
+
+1. **Bulk capacitance across the battery input** — solder a **1000–2200 µF low-ESR electrolytic** (≥6.3 V; a 105 °C-rated part behaves better in the cold) directly across the 18650 holder pads. This is the classic SIMCom-board fix: it carries the millisecond-scale TX/inrush spikes that trigger most brownouts. It can *not* carry the multi-second attach current — if the cell sags under sustained load, capacitance only delays the reset (that league needs a ~1 F low-ESR supercap/LIC).
+2. **Keep the cell out of the cold zone.** The DS18B20 probe is on a wire — mount the board + battery outside the cooler and only the probe inside. Removes the root cause.
+3. **External power** where the unit rides in a vehicle anyway (also gives instant door alerts and faster reporting).
+4. A healthy, genuine cell: high-drain rated (≥5 A), not an aged or counterfeit one.
+
+Related: the board browns out on a PC USB port at power-on regardless of battery temperature — it needs a **≥2 A** supply or the 18650 for the modem's startup surge.
+
 ## Production deployment (Traefik)
 
 To run it behind Traefik on a public host, use `infra/docker-compose.traefik.yml` and set **your own** domains in the router rules (the file ships `example.com` placeholders): e.g. one host for Grafana + the OTA `/fw/` path, and one for MQTT-over-TLS on the `mqtts` entrypoint — Traefik terminates TLS, with certs via Let's Encrypt once DNS points at the host. Keep secrets in the server's `.env`. Device config for production: `MQTT_HOST` = your MQTT domain, `MQTT_PORT 8883`, flash env `t-a7608-tls`.
