@@ -36,7 +36,7 @@
 #include "deviceid.h"            // deviceNameValid(), chipSeedName() — host-testable
 #include "geo.h"                 // geoDistM() — movement detection, host-testable
 
-#define FW_VERSION "2.85"
+#define FW_VERSION "2.86"
 
 #define SerialMon Serial
 #define SerialAT  Serial1
@@ -1463,7 +1463,10 @@ static bool publishPendingFix() {                 // true = nothing pending or s
   if (!ts) return true;
   if (!mqtt.connected()) return false;
   JsonDocument doc;
-  doc["device"] = deviceId;
+  // NO "device" field: the device identity is the topic-derived TAG. A field named
+  // like the tag poisons every Flux pivot in the bucket ("a column named device
+  // already exists") — it broke the whole dashboard the moment the first backfill
+  // frame landed (21:41Z 2026-08-26; purged server-side).
   doc["ts"] = ts;
   doc["lat"] = la; doc["lon"] = lo;
   doc["hdop"] = serialized(String(hd, 1)); doc["sats"] = sa;
