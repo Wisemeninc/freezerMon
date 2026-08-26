@@ -2,7 +2,7 @@
   "title": "FreezerMon \u2014 Mobile Cooling Units",
   "uid": "freezermon-main",
   "schemaVersion": 39,
-  "version": 3,
+  "version": 4,
   "refresh": "1m",
   "time": {
     "from": "now-24h",
@@ -635,7 +635,7 @@
       "targets": [
         {
           "refId": "A",
-          "query": "from(bucket: \"telemetry\")\n |> range(start: -30d)\n |> filter(fn: (r) => (r._measurement == \"telemetry\" or r._measurement == \"alert\") and r.device == \"${device}\")\n |> pivot(rowKey: [\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n |> group()\n |> sort(columns: [\"_time\"], desc: true)\n |> limit(n: 50)\n |> drop(columns: [\"_start\",\"_stop\",\"result\",\"table\"])"
+          "query": "from(bucket: \"telemetry\")\n |> range(start: -30d)\n |> filter(fn: (r) => (r._measurement == \"telemetry\" or r._measurement == \"alert\") and r.device == \"${device}\")\n |> drop(columns: [\"device\", \"topic\", \"host\"])\n |> pivot(rowKey: [\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n |> group()\n |> sort(columns: [\"_time\"], desc: true)\n |> limit(n: 50)\n |> drop(columns: [\"_start\",\"_stop\",\"result\",\"table\"])"
         }
       ],
       "options": {
