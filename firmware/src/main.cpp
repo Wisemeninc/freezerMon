@@ -36,7 +36,7 @@
 #include "deviceid.h"            // deviceNameValid(), chipSeedName() — host-testable
 #include "geo.h"                 // geoDistM() — movement detection, host-testable
 
-#define FW_VERSION "2.80"
+#define FW_VERSION "2.81"
 
 #define SerialMon Serial
 #define SerialAT  Serial1
@@ -103,7 +103,13 @@ RTC_DATA_ATTR char     gnssModesStr[40] = "";     // +CGNSSMODE=? — the modes 
 #endif
 static int   lastFixSats = 0;
 #ifndef GNSS_MODE_STR
-#define GNSS_MODE_STR "15"   // +CGNSSMODE: 1 GPS | 2 GLONASS | 4 BeiDou | 8 Galileo -> 15 = all four
+// +CGNSSMODE on THIS A7608E-H firmware accepts (1-3) (read back 2026-08-26 20:47Z; 15 was refused):
+//   1 = GPS+GLONASS+Galileo+SBAS+QZSS (the default it was running)   2 = BeiDou only   3 = all of them
+// The 3-field +CGNSSINFO count is GPS / GLONASS / BeiDou; Galileo is folded in, not reported separately.
+#define GNSS_MODE_STR "3"
+#endif
+#ifndef GPS_ZERO_SAT_ABORT_S
+#define GPS_ZERO_SAT_ABORT_S 30   // a healthy engine sees satellites within seconds; 0 in view after this long = wedged engine or no antenna -> stop wasting the window
 #endif
 #ifndef GPS_MAX_HDOP
 #define GPS_MAX_HDOP   2.5f   // reject fixes with worse horizontal dilution (typical good fix: 0.8-1.5)
@@ -1501,6 +1507,10 @@ static bool maybeGps(uint32_t fixTimeoutS) {
   while (millis() - start < windowMs && awakeBudgetLeft()) {
     bool fix = readGnssFix(&lat, &lon, &sats, &hdop, &mode, svs);
     if (sats > maxSats) { maxSats = sats; memcpy(maxSvs, svs, sizeof(maxSvs)); }
+    if (maxSats == 0 && millis() - start >= (uint32_t)GPS_ZERO_SAT_ABORT_S * 1000UL) {
+      logLine("[gps] 0 satellites after %ds - engine wedged or no antenna, aborting hunt", GPS_ZERO_SAT_ABORT_S);
+      break;                                            // 20:47/20:50Z 2026-08-26: two 0-sat windows of 33 s and 91 s
+    }
     if (fix) {
       anyFix = true;
       if (hdop > 0 && (bestAnyHdop == 0 || hdop < bestAnyHdop)) bestAnyHdop = hdop;
