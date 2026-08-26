@@ -36,7 +36,7 @@
 #include "deviceid.h"            // deviceNameValid(), chipSeedName() — host-testable
 #include "geo.h"                 // geoDistM() — movement detection, host-testable
 
-#define FW_VERSION "2.81"
+#define FW_VERSION "2.82"
 
 #define SerialMon Serial
 #define SerialAT  Serial1
@@ -1439,6 +1439,39 @@ static void updateMovement(float prevLat, float prevLon) {
   saveMonState();                                       // no-op unless something changed
 }
 
+// A good fix is the most expensive product of a wake, and tonight four of them
+// evaporated between "obtained" and "in the DB" (PubSubClient can report a stale
+// CCH session as connected, so even the 2.78 reconnect path can publish into a
+// dead socket). Every good fix is therefore persisted to NVS with its epoch and
+// re-published as a BACKFILLED point (its own ts, gps_backfill=1) on following
+// wakes until one of the publishes actually lands; cleared only after the same
+// wake ALSO delivered its normal frame, which is the best liveness signal we have.
+static void savePendingFix(uint32_t ts, float lat, float lon, float hdop, uint8_t sats) {
+  Preferences p; p.begin("freezermon", false);
+  p.putULong("pfts", ts); p.putFloat("pfla", lat); p.putFloat("pflo", lon);
+  p.putFloat("pfhd", hdop); p.putUChar("pfsa", sats); p.end();
+}
+static void clearPendingFix() { Preferences p; p.begin("freezermon", false); p.putULong("pfts", 0); p.end(); }
+static bool publishPendingFix() {                 // true = nothing pending or sent OK
+  uint32_t ts; float la, lo, hd; uint8_t sa;
+  { Preferences p; p.begin("freezermon", true);
+    ts = p.getULong("pfts", 0); la = p.getFloat("pfla", 0); lo = p.getFloat("pflo", 0);
+    hd = p.getFloat("pfhd", 0); sa = p.getUChar("pfsa", 0); p.end(); }
+  if (!ts) return true;
+  if (!mqtt.connected()) return false;
+  JsonDocument doc;
+  doc["device"] = deviceId;
+  doc["ts"] = ts;
+  doc["lat"] = la; doc["lon"] = lo;
+  doc["hdop"] = serialized(String(hd, 1)); doc["sats"] = sa;
+  doc["buffered"] = 1; doc["gps_backfill"] = 1;
+  char topic[64]; snprintf(topic, sizeof(topic), "freezer/%s/telemetry", deviceId);
+  String out; serializeJson(doc, out);
+  bool ok = mqtt.publish(topic, out.c_str());
+  logLine("[gps] backfill fix @%lu %s", (unsigned long)ts, ok ? "sent" : "FAILED");
+  return ok;
+}
+
 static bool maybeGps(uint32_t fixTimeoutS) {
   // Cadence: GPS_EVERY_N_REPORTS wakes between attempts (0 = every wake — movement
   // detection latency IS this cadence, the board has no accelerometer). While
@@ -1466,6 +1499,10 @@ static bool maybeGps(uint32_t fixTimeoutS) {
   modem.sendAT("+CGNSSMODE=" GNSS_MODE_STR);
   int mrc = modem.waitResponse(2000L);
   if (mrc != 1) logLine("[gps] +CGNSSMODE=%s rejected (rc=%d)", GNSS_MODE_STR, mrc);
+  // 2.81 set "3" and read back 1 — try the SIM7600-style second parameter too; the
+  // read-back after enableGPS (gnss_mode field) shows what actually stuck.
+  modem.sendAT("+CGNSSMODE=" GNSS_MODE_STR ",1");
+  modem.waitResponse(2000L);
   if (!modem.enableGPS(GPS_ANTENNA_POWER_PIN, GPS_ANTENNA_POWER_LEVEL)) { logLine("[gps] enable failed"); return false; }
   { String m = atQuery("+CGNSSMODE?"); m.replace("\r", " "); m.replace("\n", " "); m.trim();
     int c = m.indexOf(':'); if (c >= 0) m = m.substring(c + 1); m.trim(); int sp = m.indexOf(' '); if (sp > 0) m = m.substring(0, sp);
@@ -1541,6 +1578,7 @@ static bool maybeGps(uint32_t fixTimeoutS) {
   if (firstGoodMs) {
     lastLat = bestLat; lastLon = bestLon;
     lastFixHdop = bestHdop; lastFixSats = maxSats;
+    if (rtcEpoch) savePendingFix(rtcEpoch, bestLat, bestLon, bestHdop, (uint8_t)(maxSats > 255 ? 255 : maxSats));
     gotFix = true;
     logLine("[gps] fix hdop=%.1f sats=%d after %lus (settle %lus)", bestHdop, maxSats,
             (firstGoodMs - start) / 1000UL, (millis() - firstGoodMs) / 1000UL);
@@ -1828,6 +1866,7 @@ void setup() {
       }
       if (mqttUp) {
         flushBuffer(now, rssiDbm);                      // backfill offline gap first
+        publishPendingFix();                            // a fix a previous wake could not deliver
         published = publishSample(s, now, false, wakeReason, rssiDbm);
 
         if (tempAlertPending) { publishAlert(s, now, "temp_breach"); tempAlertPending = 0; saveMonState(); }
@@ -1912,8 +1951,9 @@ void setup() {
             mqtt.setServer(MQTT_HOST, MQTT_PORT);
             if (!mqtt.connect(cid, MQTT_USER, MQTT_PASS)) { delay(1500); mqtt.connect(cid, MQTT_USER, MQTT_PASS); }
           }
-          if (mqtt.connected()) publishSample(s, now, false, wakeReason, rssiDbm);
-          else { gpsLastStatus = 4; logLine("[gps] fix lost - mqtt down after GNSS (rc=%d)", mqtt.state()); }
+          if (mqtt.connected()) {
+            if (publishSample(s, now, false, wakeReason, rssiDbm)) clearPendingFix();
+          } else { gpsLastStatus = 4; logLine("[gps] fix deferred - mqtt down after GNSS (rc=%d), backfills next wake", mqtt.state()); }
         }
         // movement transition detected by this (or an earlier, offline) fix —
         // fast cadence + GPS-every-wake are already active via movingActive
