@@ -41,6 +41,9 @@
 #define MOVE_STOP_M             50               // consecutive fixes closer than this = standing still
 #define MOVE_STOP_CYCLES        3                // still fixes needed to re-anchor + clear moving state
 #define GPS_FIRST_BOOT_TIMEOUT_S 30              // shorter bounded window on a cold boot; if it fixes, the coords go out THIS wake in a follow-up frame
+#define GPS_MAX_HDOP            2.5f             // fix quality gate: reject HDOP above this (good fix 0.8-1.5; first fixes are often 3-5 = +/-100 m)
+#define GPS_REQUIRE_3D          1                // require a 3D fix (2D fixes are horizontally poor too)
+#define GPS_SETTLE_S            10               // after the first good fix keep polling this long and publish the lowest-HDOP sample
 #define AGPS_REFRESH_S          7200             // re-download AGPS ephemeris at most this often (~2 h) for fast cold fixes
 // GNSS active antenna power. T-A7608/T-A7670: 127 = modem VDD_AUX rail
 // (AT+CVAUXS=1). Without this the antenna is dead — zero satellites forever.

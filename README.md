@@ -22,6 +22,7 @@ Two operating regimes: on **battery** the device deep-sleeps between reports (de
 | `vbat_mv`, `vsolar_mv` | battery / VIN-solar millivolts |
 | `rssi_dbm` | LTE signal |
 | `lat`, `lon` | GPS fix — **present only when a fix was obtained that wake** (attempted every Nth report to save power). A missing coordinate means "no fix", never a replayed old position; last-known location is whatever the DB holds. |
+| `hdop`, `sats` | quality of that fix (horizontal dilution of precision, satellites tracked) — present with `lat`/`lon`. Fixes are gated: 3D with HDOP ≤ `GPS_MAX_HDOP` (2.5), and the lowest-HDOP sample of a `GPS_SETTLE_S` (10 s) dwell after the first good one; a window that never meets the gate publishes no coordinate. |
 | `alarm` | 1 = temp breach active (N consecutive over-threshold samples) |
 | `moving` | 1 = unit displaced > `MOVE_ALARM_M` from its parked position (GPS-based) |
 | `buffered` | 1 = backfilled sample from an offline gap |

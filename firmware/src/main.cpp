@@ -36,7 +36,7 @@
 #include "deviceid.h"            // deviceNameValid(), chipSeedName() — host-testable
 #include "geo.h"                 // geoDistM() — movement detection, host-testable
 
-#define FW_VERSION "2.69"
+#define FW_VERSION "2.70"
 
 #define SerialMon Serial
 #define SerialAT  Serial1
@@ -80,6 +80,17 @@ RTC_DATA_ATTR uint8_t  reportsSinceGps = 0xFF;  // force fix on first boot
 RTC_DATA_ATTR uint8_t  gnssZeroSatStreak = 0;   // GNSS-wedge watchdog: consecutive attempts tracking 0 sats
 RTC_DATA_ATTR float    lastLat = 0, lastLon = 0; // most recent fix — movement baseline; NOT auto-published (see gpsFreshThisWake)
 static bool gpsFreshThisWake = false;            // set only by a successful fix THIS wake — a published coordinate is a measurement, not a memory
+static float lastFixHdop = 0;                    // quality of the fix behind lastLat/lastLon (published with it)
+static int   lastFixSats = 0;
+#ifndef GPS_MAX_HDOP
+#define GPS_MAX_HDOP   2.5f   // reject fixes with worse horizontal dilution (typical good fix: 0.8-1.5)
+#endif
+#ifndef GPS_REQUIRE_3D
+#define GPS_REQUIRE_3D 1      // 2D fixes (no altitude solution) are also horizontally poor — reject
+#endif
+#ifndef GPS_SETTLE_S
+#define GPS_SETTLE_S   10     // keep polling this long after the first good fix, publish the lowest-HDOP sample
+#endif
 static bool agpsLoaded = false;                  // ephemeris lives in GNSS-engine RAM: false after every modem power cycle
 RTC_DATA_ATTR uint32_t rtcEpoch = 0;            // best-known epoch, aged across sleeps
 RTC_DATA_ATTR uint32_t lastAgpsEpoch = 0;       // when AGPS ephemeris was last downloaded (validity ~hours)
@@ -458,7 +469,7 @@ static const char *plmnName(const String &plmn) {
   return "unknown";
 }
 
-static bool readGnssFix(float *outLat, float *outLon, int *satsUsed);  // defined near maybeGps
+static bool readGnssFix(float *outLat, float *outLon, int *satsUsed, float *hdopOut = nullptr, int *fixMode = nullptr);  // defined near maybeGps
 
 static String atQuery(const char *cmd, uint32_t timeoutMs = 3000) {
   modem.sendAT(cmd);
@@ -622,13 +633,16 @@ static void startDebugAp() {
       if (!gnssDebugOn)                                   // stays on while console is up
         gnssDebugOn = modem.enableGPS(GPS_ANTENNA_POWER_PIN, GPS_ANTENNA_POWER_LEVEL);
       doc["gnss_powered"] = gnssDebugOn;
-      float lat = 0, lon = 0;
-      int sats = 0;
-      if (readGnssFix(&lat, &lon, &sats)) {              // anchor-based parse — fork's getGPS misreads this modem
+      float lat = 0, lon = 0, hdop = 0;
+      int sats = 0, mode = 0;
+      if (readGnssFix(&lat, &lon, &sats, &hdop, &mode)) { // anchor-based parse — fork's getGPS misreads this modem
         doc["fix"] = true;
         doc["lat"] = lat;
         doc["lon"] = lon;
         doc["sats"] = sats;
+        doc["mode"] = mode;                                // 2 = 2D, 3 = 3D
+        doc["hdop"] = serialized(String(hdop, 1));
+        doc["quality_ok"] = (mode >= 3 || !GPS_REQUIRE_3D) && hdop > 0 && hdop <= GPS_MAX_HDOP;
         doc["raw"] = atQuery("+CGNSSINFO");
         // deliberately NOT written to lastLat/lastLon: a console-triggered fix is not
         // a report and must not shift the movement-detection baseline
@@ -1281,8 +1295,14 @@ static void evaluateAlarm(Sample &s) {
 // fields), so the fork's fixed-offset getGPS reads date fields as coordinates
 // on this modem (seen live: lon = 130726, i.e. ddmmyy). Anchor on the N/S
 // indicator instead: lat sits right before it, lon right after.
-static bool readGnssFix(float *outLat, float *outLon, int *satsUsed) {
+// Field order (A76XX, confirmed against the TinyGSM fork's own parser):
+//   <mode>,<GPS-SVs>,<BEIDOU-SVs>,<GLONASS-SVs>,<GALILEO-SVs>,<lat>,<N/S>,<lon>,<E/W>,
+//   <date>,<UTC>,<alt>,<speed>,<course>,<PDOP>,<HDOP>,<VDOP>
+// Anchored on the N/S token so a firmware that drops a leading field still parses.
+static bool readGnssFix(float *outLat, float *outLon, int *satsUsed, float *hdopOut, int *fixMode) {
   if (satsUsed) *satsUsed = 0;
+  if (hdopOut)  *hdopOut  = 0;
+  if (fixMode)  *fixMode  = 0;
   String raw = atQuery("+CGNSSINFO");
   int p = raw.indexOf("+CGNSSINFO:");
   if (p < 0) return false;
@@ -1309,6 +1329,8 @@ static bool readGnssFix(float *outLat, float *outLon, int *satsUsed) {
     if ((tok[i] == "N" || tok[i] == "S") && (tok[i + 2] == "E" || tok[i + 2] == "W")) { ns = i; break; }
   }
   if (ns < 1 || !tok[ns - 1].length() || !tok[ns + 1].length()) return false;  // no fix yet
+  if (fixMode) *fixMode = tok[0].toInt();                                       // 2 = 2D, 3 = 3D
+  if (hdopOut && ns + 9 < n) *hdopOut = tok[ns + 9].toFloat();                  // HDOP (0 if absent)
   float lat = tok[ns - 1].toFloat();
   float lon = tok[ns + 1].toFloat();
   // some firmware sends decimal degrees, some ddmm.mmmmmm — out-of-range
@@ -1380,20 +1402,42 @@ static bool maybeGps(uint32_t fixTimeoutS) {
     if (modem.waitResponse(20000L) == 1) { agpsLoaded = true; lastAgpsEpoch = rtcEpoch; saveMonState(); logLine("[gps] AGPS ephemeris loaded"); }
     else                                   logLine("[gps] AGPS load failed - unassisted cold fix");
   }
-  float lat, lon;
-  int sats = 0, maxSats = 0;
-  bool gotFix = false;
+  // Quality gate (2.70): the first sentence with a lat/lon is typically a 4-5 SV,
+  // HDOP 3-5 fix — a +/-100 m position. Today's bench data: 40 first-fixes spread
+  // 196 m N-S, enough to trip MOVE_ALARM_M from an unlucky anchor. So a fix must
+  // be 3D (GPS_REQUIRE_3D) with HDOP <= GPS_MAX_HDOP, and after the first good one
+  // we keep polling for GPS_SETTLE_S and publish the LOWEST-HDOP sample. A window
+  // that never produces a good fix reports no coordinate at all — absence is the
+  // signal, a bad coordinate is not.
+  float lat, lon, hdop;
+  int sats = 0, maxSats = 0, mode = 0;
+  bool gotFix = false, rejectLogged = false;
+  float bestHdop = 1e9f, bestLat = 0, bestLon = 0;
+  uint32_t firstGoodMs = 0;
   float prevLat = lastLat, prevLon = lastLon;           // previous fix, for movement detection
   uint32_t start = millis();
   while (millis() - start < fixTimeoutS * 1000UL && awakeBudgetLeft()) {
-    bool fix = readGnssFix(&lat, &lon, &sats);
+    bool fix = readGnssFix(&lat, &lon, &sats, &hdop, &mode);
     if (sats > maxSats) maxSats = sats;
     if (fix) {
-      lastLat = lat; lastLon = lon;
-      gotFix = true;
-      break;
+      bool good = (mode >= 3 || !GPS_REQUIRE_3D) && hdop > 0 && hdop <= GPS_MAX_HDOP;
+      if (good) {
+        if (hdop < bestHdop) { bestHdop = hdop; bestLat = lat; bestLon = lon; }
+        if (!firstGoodMs) firstGoodMs = millis();
+        if (millis() - firstGoodMs >= (uint32_t)GPS_SETTLE_S * 1000UL || hdop <= 1.0f) break;   // settled
+      } else if (!rejectLogged) {
+        logLine("[gps] fix rejected mode=%d hdop=%.1f sats=%d - waiting for a better one", mode, hdop, sats);
+        rejectLogged = true;
+      }
     }
     delay(2000);
+  }
+  if (firstGoodMs) {
+    lastLat = bestLat; lastLon = bestLon;
+    lastFixHdop = bestHdop; lastFixSats = maxSats;
+    gotFix = true;
+    logLine("[gps] fix hdop=%.1f sats=%d after %lus (settle %lus)", bestHdop, maxSats,
+            (firstGoodMs - start) / 1000UL, (millis() - firstGoodMs) / 1000UL);
   }
   if (gotFix) { gpsFreshThisWake = true; updateMovement(prevLat, prevLon); }
   // GNSS-wedge watchdog: an engine that is powered but tracks 0 satellites the
@@ -1457,6 +1501,8 @@ static bool publishSample(const Sample &s, uint32_t nowEpoch, bool buffered,
       (lastLat != 0 || lastLon != 0) && fabsf(lastLat) <= 90.0f && fabsf(lastLon) <= 180.0f) {
     doc["lat"] = lastLat;
     doc["lon"] = lastLon;
+    doc["hdop"] = serialized(String(lastFixHdop, 1));
+    doc["sats"] = lastFixSats;
   }
   doc["alarm"]     = s.alarm;
   doc["moving"]    = movingActive;
