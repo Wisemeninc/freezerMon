@@ -2,7 +2,7 @@
   "title": "FreezerMon \u2014 Mobile Cooling Units",
   "uid": "freezermon-main",
   "schemaVersion": 39,
-  "version": 1,
+  "version": 2,
   "refresh": "1m",
   "time": {
     "from": "now-24h",
@@ -326,7 +326,7 @@
       "title": "Temperature",
       "gridPos": {
         "x": 0,
-        "y": 5,
+        "y": 9,
         "w": 16,
         "h": 9
       },
@@ -406,7 +406,7 @@
       "title": "Location",
       "gridPos": {
         "x": 16,
-        "y": 5,
+        "y": 9,
         "w": 8,
         "h": 9
       },
@@ -460,7 +460,7 @@
       "title": "Door history",
       "gridPos": {
         "x": 0,
-        "y": 14,
+        "y": 26,
         "w": 8,
         "h": 7
       },
@@ -515,7 +515,7 @@
       "title": "Battery voltage",
       "gridPos": {
         "x": 8,
-        "y": 14,
+        "y": 26,
         "w": 8,
         "h": 7
       },
@@ -569,7 +569,7 @@
       "title": "Signal strength",
       "gridPos": {
         "x": 16,
-        "y": 14,
+        "y": 26,
         "w": 8,
         "h": 7
       },
@@ -628,14 +628,14 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 21,
+        "y": 33,
         "w": 24,
         "h": 10
       },
       "targets": [
         {
           "refId": "A",
-          "query": "from(bucket: \"telemetry\")\n |> range(start: -30d)\n |> filter(fn: (r) => (r._measurement == \"telemetry\" or r._measurement == \"alert\") and r.device == \"${device}\")\n |> pivot(rowKey: [\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n |> group()\n |> sort(columns: [\"_time\"], desc: true)\n |> limit(n: 50)\n |> keep(columns: [\"_time\",\"_measurement\",\"kind\",\"wake\",\"t_cab\",\"t_amb\",\"door\",\"ext_power\",\"alarm\",\"vbat_mv\",\"vsolar_mv\",\"rssi_dbm\",\"lat\",\"lon\",\"boot\",\"buffered\",\"powered\",\"fw\"])"
+          "query": "from(bucket: \"telemetry\")\n |> range(start: -30d)\n |> filter(fn: (r) => (r._measurement == \"telemetry\" or r._measurement == \"alert\") and r.device == \"${device}\")\n |> pivot(rowKey: [\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n |> group()\n |> sort(columns: [\"_time\"], desc: true)\n |> limit(n: 50)\n |> keep(columns: [\"_time\",\"_measurement\",\"kind\",\"wake\",\"t_cab\",\"t_amb\",\"door\",\"ext_power\",\"alarm\",\"vbat_mv\",\"vsolar_mv\",\"rssi_dbm\",\"lat\",\"lon\",\"boot\",\"buffered\",\"powered\",\"fw\",\"rst\",\"ph\",\"moving\",\"hdop\",\"sats\"])"
         }
       ],
       "options": {
@@ -803,6 +803,681 @@
           }
         ]
       }
+    },
+    {
+      "id": 12,
+      "type": "stat",
+      "title": "Alarm",
+      "description": "Cabinet temperature breach latched (N consecutive samples over TEMP_ALARM_C). 1 = fast reporting (60 s).",
+      "gridPos": {
+        "x": 0,
+        "y": 5,
+        "w": 4,
+        "h": 4
+      },
+      "datasource": {
+        "type": "influxdb",
+        "uid": "influxdb"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "OK",
+                  "color": "green",
+                  "index": 0
+                },
+                "1": {
+                  "text": "BREACH",
+                  "color": "red",
+                  "index": 1
+                }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influxdb"
+          },
+          "refId": "A",
+          "query": "from(bucket: \"telemetry\")\n |> range(start: -30d)\n |> filter(fn: (r) => r._measurement == \"telemetry\" and r.device == \"${device}\" and r._field == \"alarm\")\n |> last()"
+        }
+      ]
+    },
+    {
+      "id": 13,
+      "type": "stat",
+      "title": "Movement",
+      "description": "GPS displacement > MOVE_ALARM_M from the parked anchor. 1 = fast reporting + a fix every wake.",
+      "gridPos": {
+        "x": 4,
+        "y": 5,
+        "w": 4,
+        "h": 4
+      },
+      "datasource": {
+        "type": "influxdb",
+        "uid": "influxdb"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "parked",
+                  "color": "green",
+                  "index": 0
+                },
+                "1": {
+                  "text": "MOVING",
+                  "color": "orange",
+                  "index": 1
+                }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influxdb"
+          },
+          "refId": "A",
+          "query": "from(bucket: \"telemetry\")\n |> range(start: -30d)\n |> filter(fn: (r) => r._measurement == \"telemetry\" and r.device == \"${device}\" and r._field == \"moving\")\n |> last()"
+        }
+      ]
+    },
+    {
+      "id": 14,
+      "type": "stat",
+      "title": "Last wake",
+      "description": "Why the last cycle ran: timer (normal), door (reed wake), cold boot (power-on / reset / brownout), powered (mains loop).",
+      "gridPos": {
+        "x": 8,
+        "y": 5,
+        "w": 4,
+        "h": 4
+      },
+      "datasource": {
+        "type": "influxdb",
+        "uid": "influxdb"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "timer": {
+                  "text": "timer",
+                  "color": "green",
+                  "index": 0
+                },
+                "door": {
+                  "text": "door",
+                  "color": "orange",
+                  "index": 1
+                },
+                "power_on": {
+                  "text": "cold boot",
+                  "color": "red",
+                  "index": 2
+                },
+                "powered": {
+                  "text": "powered",
+                  "color": "blue",
+                  "index": 3
+                }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influxdb"
+          },
+          "refId": "A",
+          "query": "from(bucket: \"telemetry\")\n |> range(start: -30d)\n |> filter(fn: (r) => r._measurement == \"telemetry\" and r.device == \"${device}\" and r._field == \"wake\")\n |> last()"
+        }
+      ]
+    },
+    {
+      "id": 15,
+      "type": "stat",
+      "title": "Last reset",
+      "description": "Reset reason of the last boot. BROWNOUT = supply sagged under the modem inrush (holder contact / weak cell); WDT/PANIC = firmware fault.",
+      "gridPos": {
+        "x": 12,
+        "y": 5,
+        "w": 4,
+        "h": 4
+      },
+      "datasource": {
+        "type": "influxdb",
+        "uid": "influxdb"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "deepsleep": {
+                  "text": "deep sleep",
+                  "color": "green",
+                  "index": 0
+                },
+                "sw": {
+                  "text": "restart",
+                  "color": "blue",
+                  "index": 1
+                },
+                "poweron": {
+                  "text": "power-on",
+                  "color": "yellow",
+                  "index": 2
+                },
+                "BROWNOUT": {
+                  "text": "BROWNOUT",
+                  "color": "red",
+                  "index": 3
+                },
+                "INT_WDT": {
+                  "text": "INT_WDT",
+                  "color": "purple",
+                  "index": 4
+                },
+                "TASK_WDT": {
+                  "text": "TASK_WDT",
+                  "color": "purple",
+                  "index": 5
+                },
+                "PANIC": {
+                  "text": "PANIC",
+                  "color": "purple",
+                  "index": 6
+                }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influxdb"
+          },
+          "refId": "A",
+          "query": "from(bucket: \"telemetry\")\n |> range(start: -30d)\n |> filter(fn: (r) => r._measurement == \"telemetry\" and r.device == \"${device}\" and r._field == \"rst\")\n |> last()"
+        }
+      ]
+    },
+    {
+      "id": 16,
+      "type": "stat",
+      "title": "Firmware",
+      "description": "Running firmware version (from the last frame).",
+      "gridPos": {
+        "x": 16,
+        "y": 5,
+        "w": 4,
+        "h": 4
+      },
+      "datasource": {
+        "type": "influxdb",
+        "uid": "influxdb"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {}
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influxdb"
+          },
+          "refId": "A",
+          "query": "from(bucket: \"telemetry\")\n |> range(start: -30d)\n |> filter(fn: (r) => r._measurement == \"telemetry\" and r.device == \"${device}\" and r._field == \"fw\")\n |> last()"
+        }
+      ]
+    },
+    {
+      "id": 17,
+      "type": "stat",
+      "title": "Fix quality",
+      "description": "HDOP of the last published fix (lower is better; fixes above GPS_MAX_HDOP are never published).",
+      "gridPos": {
+        "x": 20,
+        "y": 5,
+        "w": 4,
+        "h": 4
+      },
+      "datasource": {
+        "type": "influxdb",
+        "uid": "influxdb"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {}
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 1.5
+              },
+              {
+                "color": "red",
+                "value": 2.5
+              }
+            ]
+          },
+          "decimals": 1
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influxdb"
+          },
+          "refId": "A",
+          "query": "from(bucket: \"telemetry\")\n |> range(start: -30d)\n |> filter(fn: (r) => r._measurement == \"telemetry\" and r.device == \"${device}\" and r._field == \"hdop\")\n |> last()"
+        }
+      ]
+    },
+    {
+      "id": 18,
+      "type": "state-timeline",
+      "title": "Device state",
+      "description": "Alarm, movement, power source, wake reason and reset reason per frame. Red BROWNOUT / cold-boot bands = the unit is rebooting on inrush instead of sleeping.",
+      "gridPos": {
+        "x": 0,
+        "y": 18,
+        "w": 24,
+        "h": 8
+      },
+      "datasource": {
+        "type": "influxdb",
+        "uid": "influxdb"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "fillOpacity": 70,
+            "lineWidth": 0
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "alarm"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Alarm"
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "0": {
+                        "text": "ok",
+                        "color": "green",
+                        "index": 0
+                      },
+                      "1": {
+                        "text": "BREACH",
+                        "color": "red",
+                        "index": 1
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "moving"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Movement"
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "0": {
+                        "text": "parked",
+                        "color": "green",
+                        "index": 0
+                      },
+                      "1": {
+                        "text": "MOVING",
+                        "color": "orange",
+                        "index": 1
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "ext_power"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Power"
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "0": {
+                        "text": "battery",
+                        "color": "blue",
+                        "index": 0
+                      },
+                      "1": {
+                        "text": "mains",
+                        "color": "green",
+                        "index": 1
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "wake"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Wake"
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "timer": {
+                        "text": "timer",
+                        "color": "green",
+                        "index": 0
+                      },
+                      "door": {
+                        "text": "door",
+                        "color": "orange",
+                        "index": 1
+                      },
+                      "power_on": {
+                        "text": "cold boot",
+                        "color": "red",
+                        "index": 2
+                      },
+                      "powered": {
+                        "text": "powered",
+                        "color": "blue",
+                        "index": 3
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "rst"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Reset"
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "deepsleep": {
+                        "text": "deep sleep",
+                        "color": "green",
+                        "index": 0
+                      },
+                      "sw": {
+                        "text": "restart",
+                        "color": "blue",
+                        "index": 1
+                      },
+                      "poweron": {
+                        "text": "power-on",
+                        "color": "yellow",
+                        "index": 2
+                      },
+                      "BROWNOUT": {
+                        "text": "BROWNOUT",
+                        "color": "red",
+                        "index": 3
+                      },
+                      "INT_WDT": {
+                        "text": "INT_WDT",
+                        "color": "purple",
+                        "index": 4
+                      },
+                      "TASK_WDT": {
+                        "text": "TASK_WDT",
+                        "color": "purple",
+                        "index": 5
+                      },
+                      "PANIC": {
+                        "text": "PANIC",
+                        "color": "purple",
+                        "index": 6
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single"
+        },
+        "mergeValues": true,
+        "showValue": "never",
+        "rowHeight": 0.8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influxdb"
+          },
+          "refId": "A",
+          "query": "from(bucket: \"telemetry\")\n |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n |> filter(fn: (r) => r._measurement == \"telemetry\" and r.device == \"${device}\" and (r._field == \"alarm\" or r._field == \"moving\" or r._field == \"ext_power\"))\n |> aggregateWindow(every: v.windowPeriod, fn: max, createEmpty: false)\n |> keep(columns: [\"_time\",\"_field\",\"_value\"])"
+        },
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influxdb"
+          },
+          "refId": "B",
+          "query": "from(bucket: \"telemetry\")\n |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n |> filter(fn: (r) => r._measurement == \"telemetry\" and r.device == \"${device}\" and (r._field == \"wake\" or r._field == \"rst\"))\n |> aggregateWindow(every: v.windowPeriod, fn: last, createEmpty: false)\n |> keep(columns: [\"_time\",\"_field\",\"_value\"])"
+        }
+      ]
     }
   ]
 }
