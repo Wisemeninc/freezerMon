@@ -36,7 +36,7 @@
 #include "deviceid.h"            // deviceNameValid(), chipSeedName() — host-testable
 #include "geo.h"                 // geoDistM() — movement detection, host-testable
 
-#define FW_VERSION "2.77"
+#define FW_VERSION "2.78"
 
 #define SerialMon Serial
 #define SerialAT  Serial1
@@ -87,6 +87,7 @@ RTC_DATA_ATTR uint8_t gpsMissStreak = 0;         // consecutive attempts with no
 // than indistinguishable from "did not try" (the frame goes out before the hunt,
 // and only a success sends the follow-up). RTC: survives sleep, not brownouts.
 //   0 = no attempt yet   1 = no fix in window   2 = fix seen but rejected by the gate   3 = fix published
+//   4 = good fix obtained but the follow-up frame could not be sent (MQTT down after GNSS, even after a reconnect)
 RTC_DATA_ATTR uint8_t  gpsLastStatus = 0;
 RTC_DATA_ATTR uint16_t gpsLastSecs   = 0;
 RTC_DATA_ATTR float    gpsLastHdop   = 0;         // best HDOP seen in that window (rejected or not)
@@ -1877,8 +1878,21 @@ void setup() {
         // `now` guard: if the clock never synced this cycle, `ts` is omitted from
         // both frames and the same-ts upsert can't happen -> skip to avoid a
         // duplicate point (the fix is retried after the normal GPS cadence).
-        if (gotFix && published && now && mqtt.connected())
-          publishSample(s, now, false, wakeReason, rssiDbm);
+        if (gotFix && published && now) {
+          // GNSS shares the RF path and can drop the CCH session underneath MQTT;
+          // 20:22Z 2026-08-26: gps_last=3 after a 30 s hunt, no coordinates ever
+          // published. A fix is the most expensive thing this wake produced — spend
+          // a few seconds on a fresh MQTT connect rather than throw it away.
+          if (!mqtt.connected()) {
+            logLine("[gps] mqtt dropped during GNSS - reconnecting for the fix frame");
+            netClient.stop();
+            char cid[48]; snprintf(cid, sizeof(cid), "freezermon-%s", deviceId);
+            mqtt.setServer(MQTT_HOST, MQTT_PORT);
+            if (!mqtt.connect(cid, MQTT_USER, MQTT_PASS)) { delay(1500); mqtt.connect(cid, MQTT_USER, MQTT_PASS); }
+          }
+          if (mqtt.connected()) publishSample(s, now, false, wakeReason, rssiDbm);
+          else { gpsLastStatus = 4; logLine("[gps] fix lost - mqtt down after GNSS (rc=%d)", mqtt.state()); }
+        }
         // movement transition detected by this (or an earlier, offline) fix —
         // fast cadence + GPS-every-wake are already active via movingActive
         if (moveAlertPending && mqtt.connected()) {
