@@ -36,7 +36,7 @@
 #include "deviceid.h"            // deviceNameValid(), chipSeedName() — host-testable
 #include "geo.h"                 // geoDistM() — movement detection, host-testable
 
-#define FW_VERSION "2.75"
+#define FW_VERSION "2.76"
 
 #define SerialMon Serial
 #define SerialAT  Serial1
@@ -99,6 +99,9 @@ RTC_DATA_ATTR char     gpsLastSvs[16] = "";       // constellation split at that
 #define GPS_MISS_BACKOFF_N     3   // (a success snaps back to GPS_EVERY_N_REPORTS)
 #endif
 static int   lastFixSats = 0;
+#ifndef GNSS_MODE_STR
+#define GNSS_MODE_STR "15"   // +CGNSSMODE: 1 GPS | 2 GLONASS | 4 BeiDou | 8 Galileo -> 15 = all four
+#endif
 #ifndef GPS_MAX_HDOP
 #define GPS_MAX_HDOP   2.5f   // reject fixes with worse horizontal dilution (typical good fix: 0.8-1.5)
 #endif
@@ -1433,7 +1436,15 @@ static bool maybeGps(uint32_t fixTimeoutS) {
   // no-fix cycle (unit indoors) must wait N reports again — resetting only on
   // success made GNSS hunt 90 s on EVERY wake and starve the MQTT session.
   reportsSinceGps = 0;
+  // Constellations: the firmware never selected any, so the engine ran the modem's
+  // default (commonly GPS+GLONASS on A76XX). Ask for all four — GPS+GLONASS+BeiDou+
+  // Galileo (+CGNSSMODE bitmask 1|2|4|8 = 15) — before powering the engine; more
+  // satellites in view is the cheapest HDOP improvement there is. Best-effort: an
+  // ERROR leaves the default, and the read-back is logged so /log shows what stuck.
+  modem.sendAT("+CGNSSMODE=" GNSS_MODE_STR);
+  modem.waitResponse(2000L);
   if (!modem.enableGPS(GPS_ANTENNA_POWER_PIN, GPS_ANTENNA_POWER_LEVEL)) { logLine("[gps] enable failed"); return false; }
+  { String m = atQuery("+CGNSSMODE?"); m.replace("\r", " "); m.replace("\n", " "); m.trim(); logLine("[gps] mode %s", m.c_str()); }
   // Assisted GNSS: pull current ephemeris from SIMCom's AGNSS server over the (already
   // attached) data bearer so a cold start fixes in seconds instead of timing out at 90 s.
   // AGPS data stays valid a few hours → refresh at most every ~2 h to spare the SIM.
