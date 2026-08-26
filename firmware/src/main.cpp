@@ -36,7 +36,7 @@
 #include "deviceid.h"            // deviceNameValid(), chipSeedName() — host-testable
 #include "geo.h"                 // geoDistM() — movement detection, host-testable
 
-#define FW_VERSION "2.82"
+#define FW_VERSION "2.83"
 
 #define SerialMon Serial
 #define SerialAT  Serial1
@@ -1490,23 +1490,19 @@ static bool maybeGps(uint32_t fixTimeoutS) {
   // Galileo (+CGNSSMODE bitmask 1|2|4|8 = 15) — before powering the engine; more
   // satellites in view is the cheapest HDOP improvement there is. Best-effort: an
   // ERROR leaves the default, and the read-back is logged so /log shows what stuck.
-  if (!gnssModesStr[0]) {                               // once: what does this firmware accept? (2.77 read back "1" after asking for 15)
-    String r = atQuery("+CGNSSMODE=?"); r.replace("\r", " "); r.replace("\n", " "); r.trim();
-    int c = r.indexOf(':'); if (c >= 0) r = r.substring(c + 1); r.trim(); r.replace(" OK", ""); r.trim();
-    strlcpy(gnssModesStr, r.length() ? r.c_str() : "?", sizeof(gnssModesStr));
-    logLine("[gps] modes supported: %s", gnssModesStr);
-  }
-  modem.sendAT("+CGNSSMODE=" GNSS_MODE_STR);
-  int mrc = modem.waitResponse(2000L);
-  if (mrc != 1) logLine("[gps] +CGNSSMODE=%s rejected (rc=%d)", GNSS_MODE_STR, mrc);
-  // 2.81 set "3" and read back 1 — try the SIM7600-style second parameter too; the
-  // read-back after enableGPS (gnss_mode field) shows what actually stuck.
-  modem.sendAT("+CGNSSMODE=" GNSS_MODE_STR ",1");
-  modem.waitResponse(2000L);
+  // NO +CGNSSMODE traffic (2.83). Between 2.76 and 2.82 every hunt was preceded by
+  // mode writes/probes ("15", "=?", "3", "3,1" — the engine kept answering 1, i.e.
+  // GPS+GLONASS+Galileo, and refused the rest). In the same window the engine began
+  // coming up BLIND — 0 satellites for whole windows, OUTDOORS, roughly every other
+  // power cycle — which never happened before 2.76 (July: a fix every single cycle).
+  // Poking the engine's mode NVRAM on every power-up is the prime suspect, and mode 1
+  // was fine (11-17 sats, HDOP 1-2). This restores the exact pre-2.76 init sequence.
   if (!modem.enableGPS(GPS_ANTENNA_POWER_PIN, GPS_ANTENNA_POWER_LEVEL)) { logLine("[gps] enable failed"); return false; }
+  // read-only mode query kept: it is how we learned the engine's answer, and reading
+  // has never correlated with blindness the way writing might have
   { String m = atQuery("+CGNSSMODE?"); m.replace("\r", " "); m.replace("\n", " "); m.trim();
     int c = m.indexOf(':'); if (c >= 0) m = m.substring(c + 1); m.trim(); int sp = m.indexOf(' '); if (sp > 0) m = m.substring(0, sp);
-    strlcpy(gnssModeStr, m.c_str(), sizeof(gnssModeStr)); logLine("[gps] mode %s", gnssModeStr); }
+    strlcpy(gnssModeStr, m.c_str(), sizeof(gnssModeStr)); }
   // Assisted GNSS: pull current ephemeris from SIMCom's AGNSS server over the (already
   // attached) data bearer so a cold start fixes in seconds instead of timing out at 90 s.
   // AGPS data stays valid a few hours → refresh at most every ~2 h to spare the SIM.
