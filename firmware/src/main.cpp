@@ -36,7 +36,7 @@
 #include "deviceid.h"            // deviceNameValid(), chipSeedName() — host-testable
 #include "geo.h"                 // geoDistM() — movement detection, host-testable
 
-#define FW_VERSION "2.79"
+#define FW_VERSION "2.80"
 
 #define SerialMon Serial
 #define SerialAT  Serial1
@@ -1737,9 +1737,12 @@ void setup() {
       rr == ESP_RST_SW        ? "sw"        : "other";
   g_resetStr = resetStr;
   { Preferences p; p.begin("freezermon", true); prevPhase = p.getUChar("ph", 0); brownoutStreak = p.getUChar("bos", 0); p.end(); }
-  if (rr == ESP_RST_BROWNOUT) { if (brownoutStreak < 255) brownoutStreak++; }
-  else if (rr == ESP_RST_DEEPSLEEP) brownoutStreak = 0;
-  { Preferences p; p.begin("freezermon", false); p.putUChar("bos", brownoutStreak); p.end(); }
+  // Count brownout BOOTS; reset only once a wake has actually published (markPhase 3),
+  // not merely on waking from deep sleep. In the double-boot loop every timer wake
+  // dies at the inrush (no frame) and only the brownout reboot completes, so a
+  // reset-on-wake made the streak alternate 0/1 forever and the GNSS shed never
+  // engaged (20:43-20:45Z 2026-08-26).
+  if (rr == ESP_RST_BROWNOUT) { if (brownoutStreak < 255) brownoutStreak++; Preferences p; p.begin("freezermon", false); p.putUChar("bos", brownoutStreak); p.end(); }
   markPhase(1);                                          // cycle started
   // rr0/rr1 = ROM-level per-core reset reasons (rom/rtc.h) — e.g. 12=SW_CPU,
   // 14=EXT_CPU, 15=BROWNOUT, 5=DEEPSLEEP; distinguishes esp_restart() from a
@@ -1917,6 +1920,9 @@ void setup() {
     mainGiveModem();
   }
   markPhase(3);                                         // modem work done
+  if (rr != ESP_RST_BROWNOUT && published && brownoutStreak) {   // a non-brownout wake got its frame out: loop broken
+    brownoutStreak = 0; Preferences p; p.begin("freezermon", false); p.putUChar("bos", 0); p.end();
+  }
 
   if (!published) bufferSample(s);                      // data outlives connectivity
 
