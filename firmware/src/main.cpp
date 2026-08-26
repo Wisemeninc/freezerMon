@@ -36,7 +36,7 @@
 #include "deviceid.h"            // deviceNameValid(), chipSeedName() — host-testable
 #include "geo.h"                 // geoDistM() — movement detection, host-testable
 
-#define FW_VERSION "2.78"
+#define FW_VERSION "2.79"
 
 #define SerialMon Serial
 #define SerialAT  Serial1
@@ -94,6 +94,7 @@ RTC_DATA_ATTR float    gpsLastHdop   = 0;         // best HDOP seen in that wind
 RTC_DATA_ATTR uint8_t  gpsLastSats   = 0;         // most satellites in view at any poll of that window (fix or not)
 RTC_DATA_ATTR char     gpsLastSvs[16] = "";       // per-constellation split at that moment, in sentence order (3 fields on this firmware: GPS/GLONASS/BeiDou)
 RTC_DATA_ATTR char     gnssModeStr[12] = "";      // +CGNSSMODE? read-back after requesting all constellations
+RTC_DATA_ATTR char     gnssModesStr[40] = "";     // +CGNSSMODE=? — the modes THIS modem firmware accepts
 #ifndef GPS_MISS_BACKOFF_AFTER
 #define GPS_MISS_BACKOFF_AFTER 3   // after this many straight misses, hunt only every GPS_MISS_BACKOFF_N wakes
 #endif
@@ -1450,8 +1451,15 @@ static bool maybeGps(uint32_t fixTimeoutS) {
   // Galileo (+CGNSSMODE bitmask 1|2|4|8 = 15) — before powering the engine; more
   // satellites in view is the cheapest HDOP improvement there is. Best-effort: an
   // ERROR leaves the default, and the read-back is logged so /log shows what stuck.
+  if (!gnssModesStr[0]) {                               // once: what does this firmware accept? (2.77 read back "1" after asking for 15)
+    String r = atQuery("+CGNSSMODE=?"); r.replace("\r", " "); r.replace("\n", " "); r.trim();
+    int c = r.indexOf(':'); if (c >= 0) r = r.substring(c + 1); r.trim(); r.replace(" OK", ""); r.trim();
+    strlcpy(gnssModesStr, r.length() ? r.c_str() : "?", sizeof(gnssModesStr));
+    logLine("[gps] modes supported: %s", gnssModesStr);
+  }
   modem.sendAT("+CGNSSMODE=" GNSS_MODE_STR);
-  modem.waitResponse(2000L);
+  int mrc = modem.waitResponse(2000L);
+  if (mrc != 1) logLine("[gps] +CGNSSMODE=%s rejected (rc=%d)", GNSS_MODE_STR, mrc);
   if (!modem.enableGPS(GPS_ANTENNA_POWER_PIN, GPS_ANTENNA_POWER_LEVEL)) { logLine("[gps] enable failed"); return false; }
   { String m = atQuery("+CGNSSMODE?"); m.replace("\r", " "); m.replace("\n", " "); m.trim();
     int c = m.indexOf(':'); if (c >= 0) m = m.substring(c + 1); m.trim(); int sp = m.indexOf(' '); if (sp > 0) m = m.substring(0, sp);
@@ -1603,6 +1611,7 @@ static bool publishSample(const Sample &s, uint32_t nowEpoch, bool buffered,
     doc["gps_last_sats"] = gpsLastSats;                  // satellites in view (max over the window), fix or not
     doc["gps_last_svs"]  = gpsLastSvs;                   // per-constellation split, sentence order (see readGnssFix)
     if (gnssModeStr[0]) doc["gnss_mode"] = gnssModeStr;  // what the engine accepted from +CGNSSMODE=15
+    if (gnssModesStr[0]) doc["gnss_modes"] = gnssModesStr; // what it says it supports (+CGNSSMODE=?)
     if (gpsLastHdop > 0) doc["gps_last_hdop"] = serialized(String(gpsLastHdop, 1));
   }
   doc["alarm"]     = s.alarm;
