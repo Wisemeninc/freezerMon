@@ -36,7 +36,7 @@
 #include "deviceid.h"            // deviceNameValid(), chipSeedName() — host-testable
 #include "geo.h"                 // geoDistM() — movement detection, host-testable
 
-#define FW_VERSION "2.84"
+#define FW_VERSION "2.85"
 
 #define SerialMon Serial
 #define SerialAT  Serial1
@@ -1672,9 +1672,20 @@ static bool publishSample(const Sample &s, uint32_t nowEpoch, bool buffered,
   doc["bo_streak"] = brownoutStreak;  // consecutive brownout boots (0 on a clean wake); >= BROWNOUT_SHED_AFTER sheds GNSS
   doc["fw"]        = FW_VERSION;      // fleet version tracking + OTA confirmation
 
-  char topic[64], payload[384];
+  // 768: serializeJson TRUNCATES SILENTLY at the buffer size and returns bytes
+  // written — with the 2.7x diagnostic fields a coordinate-carrying frame passed
+  // 384 bytes and every one of them reached Telegraf as invalid JSON ("unable to
+  // parse ... bo_streak:"), which is where ALL of tonight's "lost fixes" actually
+  // died. The dead-socket theories (2.78/2.82/2.84) were chasing this. The guard
+  // below makes the failure loud if the frame ever outgrows the buffer again.
+  char topic[64], payload[768];
   snprintf(topic, sizeof(topic), "freezer/%s/telemetry", deviceId);
   size_t n = serializeJson(doc, payload, sizeof(payload));
+  size_t need = measureJson(doc);
+  if (n < need) {
+    logLine("[mqtt] frame TRUNCATED %u/%u bytes - NOT publishing garbage; grow payload[]", (unsigned)n, (unsigned)need);
+    return false;                                        // a clipped frame is invalid JSON: worse than no frame
+  }
   // live sample retained (last-known state on broker); backfill not retained
   return mqtt.publish(topic, (const uint8_t *)payload, n, !buffered);
 }
@@ -1835,7 +1846,7 @@ void setup() {
       if (now) rtcEpoch = now;          // sync the RTC estimate
       else     now = rtcEpoch;          // clock query failed -> use aged estimate
 
-      mqtt.setBufferSize(512);
+      mqtt.setBufferSize(1024);   // must exceed topic + largest frame (payload[768])
       mqtt.setSocketTimeout(15);
       mqtt.setKeepAlive(180);      // OTA downloads run minutes with no mqtt.loop() — don't let the broker drop us mid-flash
       mqtt.setCallback(mqttCallback);
