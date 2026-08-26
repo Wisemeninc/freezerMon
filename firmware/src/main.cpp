@@ -36,7 +36,7 @@
 #include "deviceid.h"            // deviceNameValid(), chipSeedName() — host-testable
 #include "geo.h"                 // geoDistM() — movement detection, host-testable
 
-#define FW_VERSION "2.73"
+#define FW_VERSION "2.74"
 
 #define SerialMon Serial
 #define SerialAT  Serial1
@@ -277,6 +277,15 @@ static void logLine(const char *fmt, ...) {
 //       completed fully; a brownout after that is the NEXT wake's inrush)
 static const char *g_resetStr = "?";
 static uint8_t prevPhase = 0;
+// Consecutive BROWNOUT boots (NVS — RTC is wiped by every brownout). A sustained
+// inrush loop means the cell/holder cannot recover between cycles; from the
+// BROWNOUT_SHED_AFTER-th consecutive brownout the recovery cycle sheds GNSS (the
+// longest RF load) so the cycle is light enough for the supply to settle, exactly
+// as the AP is shed. Reset by the first clean deep-sleep wake.
+#ifndef BROWNOUT_SHED_AFTER
+#define BROWNOUT_SHED_AFTER 3
+#endif
+static uint8_t brownoutStreak = 0;
 static void markPhase(uint8_t ph) {
   Preferences p;
   p.begin("freezermon", false);
@@ -1572,6 +1581,7 @@ static bool publishSample(const Sample &s, uint32_t nowEpoch, bool buffered,
   doc["wake"]      = wakeReason;
   doc["rst"]       = g_resetStr;      // reset reason (diagnosing the no-sleep loop)
   doc["ph"]        = prevPhase;       // how far the PREVIOUS cycle got (NVS breadcrumb, 5=reached sleep entry)
+  doc["bo_streak"] = brownoutStreak;  // consecutive brownout boots (0 on a clean wake); >= BROWNOUT_SHED_AFTER sheds GNSS
   doc["fw"]        = FW_VERSION;      // fleet version tracking + OTA confirmation
 
   char topic[64], payload[384];
@@ -1686,7 +1696,10 @@ void setup() {
       rr == ESP_RST_INT_WDT   ? "INT_WDT"   : rr == ESP_RST_DEEPSLEEP ? "deepsleep" :
       rr == ESP_RST_SW        ? "sw"        : "other";
   g_resetStr = resetStr;
-  { Preferences p; p.begin("freezermon", true); prevPhase = p.getUChar("ph", 0); p.end(); }
+  { Preferences p; p.begin("freezermon", true); prevPhase = p.getUChar("ph", 0); brownoutStreak = p.getUChar("bos", 0); p.end(); }
+  if (rr == ESP_RST_BROWNOUT) { if (brownoutStreak < 255) brownoutStreak++; }
+  else if (rr == ESP_RST_DEEPSLEEP) brownoutStreak = 0;
+  { Preferences p; p.begin("freezermon", false); p.putUChar("bos", brownoutStreak); p.end(); }
   markPhase(1);                                          // cycle started
   // rr0/rr1 = ROM-level per-core reset reasons (rom/rtc.h) — e.g. 12=SW_CPU,
   // 14=EXT_CPU, 15=BROWNOUT, 5=DEEPSLEEP; distinguishes esp_restart() from a
@@ -1819,6 +1832,9 @@ void setup() {
         if (rr == ESP_RST_BROWNOUT && prevPhase >= 2 && prevPhase <= 5) {
           reportsSinceGps = 0;                          // retry GPS only after the normal cadence
           logLine("[gps] skipped - prev cycle died under RF load (ph=%u)", prevPhase);
+        } else if (rr == ESP_RST_BROWNOUT && brownoutStreak >= BROWNOUT_SHED_AFTER) {
+          reportsSinceGps = 0;
+          logLine("[gps] skipped - %u consecutive brownout boots, light recovery cycle", brownoutStreak);
         } else {
           gotFix = maybeGps(coldBoot ? GPS_FIRST_BOOT_TIMEOUT_S : GPS_FIX_TIMEOUT_S);
         }
