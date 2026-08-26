@@ -2,7 +2,7 @@
   "title": "FreezerMon \u2014 Mobile Cooling Units",
   "uid": "freezermon-main",
   "schemaVersion": 39,
-  "version": 2,
+  "version": 3,
   "refresh": "1m",
   "time": {
     "from": "now-24h",
@@ -621,7 +621,7 @@
       "id": 11,
       "type": "table",
       "title": "Last 50 frames",
-      "description": "Most recent 50 MQTT frames received from the device (telemetry + alerts), independent of the dashboard time range.",
+      "description": "Most recent 50 MQTT frames from the device (telemetry + alerts), every field the firmware sent, independent of the dashboard time range.",
       "datasource": {
         "type": "influxdb",
         "uid": "influxdb"
@@ -635,7 +635,7 @@
       "targets": [
         {
           "refId": "A",
-          "query": "from(bucket: \"telemetry\")\n |> range(start: -30d)\n |> filter(fn: (r) => (r._measurement == \"telemetry\" or r._measurement == \"alert\") and r.device == \"${device}\")\n |> pivot(rowKey: [\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n |> group()\n |> sort(columns: [\"_time\"], desc: true)\n |> limit(n: 50)\n |> keep(columns: [\"_time\",\"_measurement\",\"kind\",\"wake\",\"t_cab\",\"t_amb\",\"door\",\"ext_power\",\"alarm\",\"vbat_mv\",\"vsolar_mv\",\"rssi_dbm\",\"lat\",\"lon\",\"boot\",\"buffered\",\"powered\",\"fw\",\"rst\",\"ph\",\"moving\",\"hdop\",\"sats\"])"
+          "query": "from(bucket: \"telemetry\")\n |> range(start: -30d)\n |> filter(fn: (r) => (r._measurement == \"telemetry\" or r._measurement == \"alert\") and r.device == \"${device}\")\n |> pivot(rowKey: [\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n |> group()\n |> sort(columns: [\"_time\"], desc: true)\n |> limit(n: 50)\n |> drop(columns: [\"_start\",\"_stop\",\"result\",\"table\"])"
         }
       ],
       "options": {
@@ -800,9 +800,139 @@
                 "value": 6
               }
             ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "gps_last"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "GPS"
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "1": {
+                        "text": "no fix",
+                        "color": "red",
+                        "index": 0
+                      },
+                      "2": {
+                        "text": "rejected",
+                        "color": "yellow",
+                        "index": 1
+                      },
+                      "3": {
+                        "text": "fix",
+                        "color": "green",
+                        "index": 2
+                      }
+                    }
+                  }
+                ]
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "rst"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Reset"
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "BROWNOUT": {
+                        "color": "red",
+                        "index": 0
+                      },
+                      "INT_WDT": {
+                        "color": "purple",
+                        "index": 1
+                      },
+                      "TASK_WDT": {
+                        "color": "purple",
+                        "index": 2
+                      },
+                      "PANIC": {
+                        "color": "purple",
+                        "index": 3
+                      },
+                      "deepsleep": {
+                        "color": "green",
+                        "index": 4
+                      }
+                    }
+                  }
+                ]
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              }
+            ]
           }
         ]
-      }
+      },
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "indexByName": {
+              "_time": 0,
+              "_measurement": 1,
+              "kind": 2,
+              "wake": 3,
+              "rst": 4,
+              "ph": 5,
+              "boot": 6,
+              "fw": 7,
+              "t_cab": 8,
+              "t_amb": 9,
+              "alarm": 10,
+              "door": 11,
+              "moving": 12,
+              "ext_power": 13,
+              "vbat_mv": 14,
+              "vsolar_mv": 15,
+              "rssi_dbm": 16,
+              "lat": 17,
+              "lon": 18,
+              "hdop": 19,
+              "sats": 20,
+              "gps_last": 21,
+              "gps_last_s": 22,
+              "gps_last_hdop": 23,
+              "rr0": 24,
+              "rr1": 25,
+              "crash_log": 26,
+              "buffered": 27,
+              "powered": 28
+            },
+            "excludeByName": {}
+          }
+        }
+      ]
     },
     {
       "id": 12,
