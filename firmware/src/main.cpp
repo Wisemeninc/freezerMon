@@ -36,7 +36,7 @@
 #include "deviceid.h"            // deviceNameValid(), chipSeedName() — host-testable
 #include "geo.h"                 // geoDistM() — movement detection, host-testable
 
-#define FW_VERSION "2.70"
+#define FW_VERSION "2.71"
 
 #define SerialMon Serial
 #define SerialAT  Serial1
@@ -81,6 +81,13 @@ RTC_DATA_ATTR uint8_t  gnssZeroSatStreak = 0;   // GNSS-wedge watchdog: consecut
 RTC_DATA_ATTR float    lastLat = 0, lastLon = 0; // most recent fix — movement baseline; NOT auto-published (see gpsFreshThisWake)
 static bool gpsFreshThisWake = false;            // set only by a successful fix THIS wake — a published coordinate is a measurement, not a memory
 static float lastFixHdop = 0;                    // quality of the fix behind lastLat/lastLon (published with it)
+RTC_DATA_ATTR uint8_t gpsMissStreak = 0;         // consecutive attempts with no gate-passing fix (indoors) — drives the backoff
+#ifndef GPS_MISS_BACKOFF_AFTER
+#define GPS_MISS_BACKOFF_AFTER 3   // after this many straight misses, hunt only every GPS_MISS_BACKOFF_N wakes
+#endif
+#ifndef GPS_MISS_BACKOFF_N
+#define GPS_MISS_BACKOFF_N     3   // (a success snaps back to GPS_EVERY_N_REPORTS)
+#endif
 static int   lastFixSats = 0;
 #ifndef GPS_MAX_HDOP
 #define GPS_MAX_HDOP   2.5f   // reject fixes with worse horizontal dilution (typical good fix: 0.8-1.5)
@@ -1378,8 +1385,14 @@ static void updateMovement(float prevLat, float prevLon) {
 }
 
 static bool maybeGps(uint32_t fixTimeoutS) {
-  // while moving, track every wake so the map follows the unit live
-  if (!movingActive && reportsSinceGps < GPS_EVERY_N_REPORTS) { reportsSinceGps++; return false; }
+  // Cadence: GPS_EVERY_N_REPORTS wakes between attempts (0 = every wake — movement
+  // detection latency IS this cadence, the board has no accelerometer). While
+  // moving, every wake regardless. A unit that keeps missing (parked in a garage)
+  // backs off to every GPS_MISS_BACKOFF_N wakes so it doesn't burn a full window
+  // every wake forever; the first success restores the configured cadence.
+  uint8_t every = GPS_EVERY_N_REPORTS;
+  if (gpsMissStreak >= GPS_MISS_BACKOFF_AFTER && every < GPS_MISS_BACKOFF_N) every = GPS_MISS_BACKOFF_N;
+  if (!movingActive && reportsSinceGps < every) { reportsSinceGps++; return false; }
   // Retry cadence, not fix cadence: reset the counter for the ATTEMPT. A
   // no-fix cycle (unit indoors) must wait N reports again — resetting only on
   // success made GNSS hunt 90 s on EVERY wake and starve the MQTT session.
@@ -1416,11 +1429,18 @@ static bool maybeGps(uint32_t fixTimeoutS) {
   uint32_t firstGoodMs = 0;
   float prevLat = lastLat, prevLon = lastLon;           // previous fix, for movement detection
   uint32_t start = millis();
-  while (millis() - start < fixTimeoutS * 1000UL && awakeBudgetLeft()) {
+  uint32_t windowMs = fixTimeoutS * 1000UL;
+  while (millis() - start < windowMs && awakeBudgetLeft()) {
     bool fix = readGnssFix(&lat, &lon, &sats, &hdop, &mode);
     if (sats > maxSats) maxSats = sats;
     if (fix) {
       bool good = (mode >= 3 || !GPS_REQUIRE_3D) && hdop > 0 && hdop <= GPS_MAX_HDOP;
+      // A fix that exists but fails the gate is converging: give the short cold-boot
+      // window the full periodic window rather than throwing the fix away at 30 s.
+      if (!good && windowMs < (uint32_t)GPS_FIX_TIMEOUT_S * 1000UL) {
+        windowMs = (uint32_t)GPS_FIX_TIMEOUT_S * 1000UL;
+        logLine("[gps] fix present but hdop=%.1f mode=%d - extending window to %ds", hdop, mode, GPS_FIX_TIMEOUT_S);
+      }
       if (good) {
         if (hdop < bestHdop) { bestHdop = hdop; bestLat = lat; bestLon = lon; }
         if (!firstGoodMs) firstGoodMs = millis();
@@ -1432,6 +1452,7 @@ static bool maybeGps(uint32_t fixTimeoutS) {
     }
     delay(2000);
   }
+  if (firstGoodMs) gpsMissStreak = 0; else if (gpsMissStreak < 255) gpsMissStreak++;
   if (firstGoodMs) {
     lastLat = bestLat; lastLon = bestLon;
     lastFixHdop = bestHdop; lastFixSats = maxSats;

@@ -34,7 +34,10 @@
 #define REPORT_INTERVAL_S       300              // normal (on battery): every 5 min
 #define REPORT_INTERVAL_POWERED_S 120            // on external power: device stays AWAKE (no deep sleep) and reports at this cadence
 #define REPORT_INTERVAL_FAST_S  60               // while alarm active or door open
-#define GPS_EVERY_N_REPORTS     6                // GPS fix every Nth wake (~30 min)
+#define GPS_EVERY_N_REPORTS     6                // wakes between GPS attempts (6 = ~30 min at the 5-min cadence). 0 = EVERY wake: movement is
+                                                 // detected within one cadence instead of ~35 min, at roughly 2x the battery drain (~8 days parked, ~2 days in alarm)
+#define GPS_MISS_BACKOFF_AFTER  3                // after this many consecutive no-fix attempts (indoors) ...
+#define GPS_MISS_BACKOFF_N      3                // ... hunt only every Nth wake until a fix succeeds
 #define GPS_FIX_TIMEOUT_S       90               // give up on fix after this (periodic wakes)
 #define COLD_CHARGE_C           0.0f             // alert if external power is present while the battery probe (t_amb, strap to the cell) is below this — Li-ion must not charge below ~0C and the board's CN3065 TEMP protection is disabled (pin grounded)
 #define MOVE_ALARM_M            150              // GPS displacement from the parked anchor that raises the `moving` alert (> GPS scatter)
