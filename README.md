@@ -44,7 +44,7 @@ No-coverage readings are buffered in RTC memory (24 samples) and backfilled with
 | DS18B20 probe(s) | data → **GPIO21**, 4.7 kΩ pull-up to 3V3; VCC 3V3; GND |
 | Reed switch (door) | between **GPIO32** and **GND** (closed door = closed switch) |
 | Battery | 18650 in on-board holder |
-| External power | 5 V to the board's VIN/solar input (also powers `ext_power` detection via GPIO34) |
+| External power | 5 V into the white JST (solar/charger input, 4.4–6 V, ≤500 mA through the CN3065 — the 18650 stays in circuit as the buffer). **`ext_power` sensing needs a 1:2 divider from JST+ to GPIO34** — see [External-power sensing](#external-power-sensing-ext_power-on-gpio34) |
 | SIM | nano-SIM, data plan, PIN disabled (or set `SIM_PIN`) |
 
 > Pin map is for the standard T-A7608E-H. Board revisions exist — if the modem won't answer, verify pins against the [LilyGO-T-A76XX](https://github.com/Xinyuan-LilyGO/LilyGO-T-A76XX) `utilities.h` for your exact board.
@@ -206,6 +206,23 @@ Full model and the independent-review findings are in [docs/HARDENING.md](docs/H
 ## Power expectations
 
 Deep sleep with the modem fully off dominates the budget. At a 5-min cadence expect roughly 2–4 weeks on a single 18650 (LTE attach ≈ 10–30 s at ~100+ mA per cycle is the main cost; GPS every 6th cycle). On external power the unit simply reports faster.
+
+### External-power sensing (`ext_power`) on GPIO34
+
+The firmware decides between the two regimes with one ADC reading: `ext_power = (GPIO34 × 2) ≥ 4400 mV` (`EXT_POWER_MIN_MV`). It assumes GPIO34 sits **behind a 1:2 divider on the VIN/solar net**, as on the T-A7608X **v1.1/V2** boards (LilyGO's `utilities.h`: *"only version v1.1 or V2 has solar adc pin"*).
+
+**On the T-A7608E-H with the soldered 18650 holder (V1.0 schematic) that divider does not exist** — GPIO34 is a bare header pin. 5 V on the white JST lights the charge LED and charges the cell, but GPIO34 floats at ~0.3 V, `ext_power` never goes to 1, and the unit keeps deep-sleeping on the battery cadence. Verified the hard way (2026-08-26): a year of telemetry with a lit charge LED and `vsolar_mv` never above noise.
+
+**Permanent fix — two resistors:**
+
+```
+JST VIN(+) ──[100 kΩ]──┬──[100 kΩ]── GND
+                       └── GPIO34 (header pin 34)
+```
+
+5 V → 2.5 V at the pin → firmware reads ~5000 mV → `ext_power=1`. Any matched pair from 47 kΩ to 220 kΩ works (25 µA at 100 k). Feeding the divider from the JST rather than USB keeps `vbat_mv` readable (the board can't read the cell while on USB) and keeps the 18650 in circuit as the buffer for the modem's 2 A bursts — the JST path is capped at the CN3065's 500 mA.
+
+**Bench test without resistors (variable PSU):** set the PSU to **2.5 V** with its current limit at the minimum *before* connecting, then PSU− → board GND, PSU+ → GPIO34. Anything from 2.2–3.0 V registers; the next wake publishes `vsolar_mv ≈ 5000`, `ext_power=1`, and the unit switches to the powered regime (no sleep, 120 s cadence, debug AP stays up). Caveats: **never put 5 V on GPIO34** (3.3 V pin, 3.6 V absolute max — 3.3 V from a PSU that overshoots is a dead pin, and it reads no better than 2.5 V); and with the PSU on the pin nothing is charging the cell while the firmware stops sleeping (~170 mA) — a ten-minute test, not a state to leave.
 
 ### The 18650: voltage ladder
 
