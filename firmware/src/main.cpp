@@ -36,7 +36,7 @@
 #include "deviceid.h"            // deviceNameValid(), chipSeedName() — host-testable
 #include "geo.h"                 // geoDistM() — movement detection, host-testable
 
-#define FW_VERSION "2.74"
+#define FW_VERSION "2.75"
 
 #define SerialMon Serial
 #define SerialAT  Serial1
@@ -90,6 +90,8 @@ RTC_DATA_ATTR uint8_t gpsMissStreak = 0;         // consecutive attempts with no
 RTC_DATA_ATTR uint8_t  gpsLastStatus = 0;
 RTC_DATA_ATTR uint16_t gpsLastSecs   = 0;
 RTC_DATA_ATTR float    gpsLastHdop   = 0;         // best HDOP seen in that window (rejected or not)
+RTC_DATA_ATTR uint8_t  gpsLastSats   = 0;         // most satellites in view at any poll of that window (fix or not)
+RTC_DATA_ATTR char     gpsLastSvs[16] = "";       // constellation split at that moment: GPS/BeiDou/GLONASS/Galileo
 #ifndef GPS_MISS_BACKOFF_AFTER
 #define GPS_MISS_BACKOFF_AFTER 3   // after this many straight misses, hunt only every GPS_MISS_BACKOFF_N wakes
 #endif
@@ -509,7 +511,7 @@ static const char *plmnName(const String &plmn) {
   return "unknown";
 }
 
-static bool readGnssFix(float *outLat, float *outLon, int *satsUsed, float *hdopOut = nullptr, int *fixMode = nullptr);  // defined near maybeGps
+static bool readGnssFix(float *outLat, float *outLon, int *satsUsed, float *hdopOut = nullptr, int *fixMode = nullptr, int *svs = nullptr);  // defined near maybeGps
 
 static String atQuery(const char *cmd, uint32_t timeoutMs = 3000) {
   modem.sendAT(cmd);
@@ -1339,8 +1341,9 @@ static void evaluateAlarm(Sample &s) {
 //   <mode>,<GPS-SVs>,<BEIDOU-SVs>,<GLONASS-SVs>,<GALILEO-SVs>,<lat>,<N/S>,<lon>,<E/W>,
 //   <date>,<UTC>,<alt>,<speed>,<course>,<PDOP>,<HDOP>,<VDOP>
 // Anchored on the N/S token so a firmware that drops a leading field still parses.
-static bool readGnssFix(float *outLat, float *outLon, int *satsUsed, float *hdopOut, int *fixMode) {
+static bool readGnssFix(float *outLat, float *outLon, int *satsUsed, float *hdopOut, int *fixMode, int *svs) {
   if (satsUsed) *satsUsed = 0;
+  if (svs) svs[0] = svs[1] = svs[2] = svs[3] = 0;
   if (hdopOut)  *hdopOut  = 0;
   if (fixMode)  *fixMode  = 0;
   String raw = atQuery("+CGNSSINFO");
@@ -1359,10 +1362,10 @@ static bool readGnssFix(float *outLat, float *outLon, int *satsUsed, float *hdop
   // Visible satellites = the 4 SV-count fields after <mode> (GPS, BeiDou,
   // GLONASS, Galileo). Set even before a fix so the GNSS watchdog can tell a
   // wedged engine (0 sats) from one that's simply still acquiring (sats > 0).
-  if (satsUsed) {
+  {
     int sum = 0;
-    for (int i = 1; i <= 4 && i < n; i++) sum += tok[i].toInt();
-    *satsUsed = sum;
+    for (int i = 1; i <= 4 && i < n; i++) { int v = tok[i].toInt(); sum += v; if (svs) svs[i - 1] = v; }
+    if (satsUsed) *satsUsed = sum;
   }
   int ns = -1;
   for (int i = 1; i < n - 2; i++) {
@@ -1460,13 +1463,14 @@ static bool maybeGps(uint32_t fixTimeoutS) {
   bool gotFix = false, rejectLogged = false;
   float bestHdop = 1e9f, bestLat = 0, bestLon = 0, bestAnyHdop = 0;
   bool anyFix = false;
+  int svs[4] = {0, 0, 0, 0}, maxSvs[4] = {0, 0, 0, 0};
   uint32_t firstGoodMs = 0;
   float prevLat = lastLat, prevLon = lastLon;           // previous fix, for movement detection
   uint32_t start = millis();
   uint32_t windowMs = fixTimeoutS * 1000UL;
   while (millis() - start < windowMs && awakeBudgetLeft()) {
-    bool fix = readGnssFix(&lat, &lon, &sats, &hdop, &mode);
-    if (sats > maxSats) maxSats = sats;
+    bool fix = readGnssFix(&lat, &lon, &sats, &hdop, &mode, svs);
+    if (sats > maxSats) { maxSats = sats; memcpy(maxSvs, svs, sizeof(maxSvs)); }
     if (fix) {
       anyFix = true;
       if (hdop > 0 && (bestAnyHdop == 0 || hdop < bestAnyHdop)) bestAnyHdop = hdop;
@@ -1490,6 +1494,8 @@ static bool maybeGps(uint32_t fixTimeoutS) {
   }
   if (firstGoodMs) gpsMissStreak = 0; else if (gpsMissStreak < 255) gpsMissStreak++;
   gpsLastStatus = firstGoodMs ? 3 : anyFix ? 2 : 1;
+  gpsLastSats   = (uint8_t)(maxSats > 255 ? 255 : maxSats);
+  snprintf(gpsLastSvs, sizeof(gpsLastSvs), "%d/%d/%d/%d", maxSvs[0], maxSvs[1], maxSvs[2], maxSvs[3]);
   gpsLastSecs   = (uint16_t)((millis() - start) / 1000UL);
   gpsLastHdop   = firstGoodMs ? bestHdop : bestAnyHdop;
   if (firstGoodMs) {
@@ -1505,7 +1511,7 @@ static bool maybeGps(uint32_t fixTimeoutS) {
   // even without a full fix — means it's alive, just acquiring.
   if (maxSats > 0) gnssZeroSatStreak = 0;
   else if (gnssZeroSatStreak < 255) gnssZeroSatStreak++;
-  if (!gotFix) logLine("[gps] no fix (maxSats=%d, wedge streak=%u)", maxSats, gnssZeroSatStreak);
+  if (!gotFix) logLine("[gps] no fix (maxSats=%d %s, wedge streak=%u)", maxSats, gpsLastSvs, gnssZeroSatStreak);
   modem.disableGPS(GPS_ANTENNA_POWER_PIN, 0);           // GNSS + antenna rail off before publish/sleep
   // GNSS shares the RF path and spews URCs; give LTE a moment to settle and
   // resync the AT parser, then re-verify the data bearer before MQTT.
@@ -1572,6 +1578,8 @@ static bool publishSample(const Sample &s, uint32_t nowEpoch, bool buffered,
   if (gpsLastStatus) {                                   // outcome of the most recent hunt (see gpsLastStatus)
     doc["gps_last"]      = gpsLastStatus;
     doc["gps_last_s"]    = gpsLastSecs;
+    doc["gps_last_sats"] = gpsLastSats;                  // satellites in view (max over the window), fix or not
+    doc["gps_last_svs"]  = gpsLastSvs;                   // "GPS/BeiDou/GLONASS/Galileo" at that moment
     if (gpsLastHdop > 0) doc["gps_last_hdop"] = serialized(String(gpsLastHdop, 1));
   }
   doc["alarm"]     = s.alarm;

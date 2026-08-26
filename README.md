@@ -23,6 +23,7 @@ Two operating regimes: on **battery** the device deep-sleeps between reports (de
 | `rssi_dbm` | LTE signal |
 | `lat`, `lon` | GPS fix — **present only when a fix was obtained that wake** (attempted every Nth report to save power). A missing coordinate means "no fix", never a replayed old position; last-known location is whatever the DB holds. |
 | `hdop`, `sats` | quality of that fix (horizontal dilution of precision; satellites in view summed over GPS/BeiDou/GLONASS/Galileo) — present with `lat`/`lon`. Fixes are gated: 3D with HDOP ≤ `GPS_MAX_HDOP` (2.5), and the lowest-HDOP sample of a `GPS_SETTLE_S` (10 s) dwell after the first good one; a window that never meets the gate publishes no coordinate. |
+| `gps_last`, `gps_last_s`, `gps_last_sats`, `gps_last_svs`, `gps_last_hdop` | outcome of the most recent GNSS hunt, in **every** frame (a hunt runs after the frame, so it describes the previous attempt): 1 = no fix, 2 = fix seen but rejected by the quality gate, 3 = published; seconds spent; most satellites in view during the window (fix or not) and their GPS/BeiDou/GLONASS/Galileo split; best HDOP seen. |
 | `alarm` | 1 = temp breach active (N consecutive over-threshold samples) |
 | `moving` | 1 = unit displaced > `MOVE_ALARM_M` from its parked position (GPS-based) |
 | `buffered` | 1 = backfilled sample from an offline gap |
