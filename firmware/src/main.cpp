@@ -36,7 +36,7 @@
 #include "deviceid.h"            // deviceNameValid(), chipSeedName() — host-testable
 #include "geo.h"                 // geoDistM() — movement detection, host-testable
 
-#define FW_VERSION "2.76"
+#define FW_VERSION "2.77"
 
 #define SerialMon Serial
 #define SerialAT  Serial1
@@ -91,7 +91,8 @@ RTC_DATA_ATTR uint8_t  gpsLastStatus = 0;
 RTC_DATA_ATTR uint16_t gpsLastSecs   = 0;
 RTC_DATA_ATTR float    gpsLastHdop   = 0;         // best HDOP seen in that window (rejected or not)
 RTC_DATA_ATTR uint8_t  gpsLastSats   = 0;         // most satellites in view at any poll of that window (fix or not)
-RTC_DATA_ATTR char     gpsLastSvs[16] = "";       // constellation split at that moment: GPS/BeiDou/GLONASS/Galileo
+RTC_DATA_ATTR char     gpsLastSvs[16] = "";       // per-constellation split at that moment, in sentence order (3 fields on this firmware: GPS/GLONASS/BeiDou)
+RTC_DATA_ATTR char     gnssModeStr[12] = "";      // +CGNSSMODE? read-back after requesting all constellations
 #ifndef GPS_MISS_BACKOFF_AFTER
 #define GPS_MISS_BACKOFF_AFTER 3   // after this many straight misses, hunt only every GPS_MISS_BACKOFF_N wakes
 #endif
@@ -1365,14 +1366,21 @@ static bool readGnssFix(float *outLat, float *outLon, int *satsUsed, float *hdop
   // Visible satellites = the 4 SV-count fields after <mode> (GPS, BeiDou,
   // GLONASS, Galileo). Set even before a fix so the GNSS watchdog can tell a
   // wedged engine (0 sats) from one that's simply still acquiring (sats > 0).
-  {
-    int sum = 0;
-    for (int i = 1; i <= 4 && i < n; i++) { int v = tok[i].toInt(); sum += v; if (svs) svs[i - 1] = v; }
-    if (satsUsed) *satsUsed = sum;
-  }
   int ns = -1;
   for (int i = 1; i < n - 2; i++) {
     if ((tok[i] == "N" || tok[i] == "S") && (tok[i + 2] == "E" || tok[i + 2] == "W")) { ns = i; break; }
+  }
+  // Satellites in view = every field between <mode> and <lat>. The A76XX manual
+  // lists four SV fields (GPS,BeiDou,GLONASS,Galileo); THIS A7608E-H firmware sends
+  // three, so a fixed "four" swallowed the latitude as a satellite count (the
+  // "55 GLONASS satellites" of 2.75). Bounded by the N/S anchor instead; before a
+  // fix (no anchor) fall back to the first three fields.
+  {
+    int nSv = ns > 0 ? ns - 2 : 3;
+    if (nSv > 4) nSv = 4;
+    int sum = 0;
+    for (int i = 1; i <= nSv && i < n; i++) { int v = tok[i].toInt(); sum += v; if (svs) svs[i - 1] = v; }
+    if (satsUsed) *satsUsed = sum;
   }
   if (ns < 1 || !tok[ns - 1].length() || !tok[ns + 1].length()) return false;  // no fix yet
   if (fixMode) *fixMode = tok[0].toInt();                                       // 2 = 2D, 3 = 3D
@@ -1444,7 +1452,9 @@ static bool maybeGps(uint32_t fixTimeoutS) {
   modem.sendAT("+CGNSSMODE=" GNSS_MODE_STR);
   modem.waitResponse(2000L);
   if (!modem.enableGPS(GPS_ANTENNA_POWER_PIN, GPS_ANTENNA_POWER_LEVEL)) { logLine("[gps] enable failed"); return false; }
-  { String m = atQuery("+CGNSSMODE?"); m.replace("\r", " "); m.replace("\n", " "); m.trim(); logLine("[gps] mode %s", m.c_str()); }
+  { String m = atQuery("+CGNSSMODE?"); m.replace("\r", " "); m.replace("\n", " "); m.trim();
+    int c = m.indexOf(':'); if (c >= 0) m = m.substring(c + 1); m.trim(); int sp = m.indexOf(' '); if (sp > 0) m = m.substring(0, sp);
+    strlcpy(gnssModeStr, m.c_str(), sizeof(gnssModeStr)); logLine("[gps] mode %s", gnssModeStr); }
   // Assisted GNSS: pull current ephemeris from SIMCom's AGNSS server over the (already
   // attached) data bearer so a cold start fixes in seconds instead of timing out at 90 s.
   // AGPS data stays valid a few hours → refresh at most every ~2 h to spare the SIM.
@@ -1590,7 +1600,8 @@ static bool publishSample(const Sample &s, uint32_t nowEpoch, bool buffered,
     doc["gps_last"]      = gpsLastStatus;
     doc["gps_last_s"]    = gpsLastSecs;
     doc["gps_last_sats"] = gpsLastSats;                  // satellites in view (max over the window), fix or not
-    doc["gps_last_svs"]  = gpsLastSvs;                   // "GPS/BeiDou/GLONASS/Galileo" at that moment
+    doc["gps_last_svs"]  = gpsLastSvs;                   // per-constellation split, sentence order (see readGnssFix)
+    if (gnssModeStr[0]) doc["gnss_mode"] = gnssModeStr;  // what the engine accepted from +CGNSSMODE=15
     if (gpsLastHdop > 0) doc["gps_last_hdop"] = serialized(String(gpsLastHdop, 1));
   }
   doc["alarm"]     = s.alarm;
