@@ -77,7 +77,7 @@ pio device monitor                             # watch the first cycle
 Notes:
 - Uses the **lewisxhe TinyGSM fork** (declared in `platformio.ini`) — stock TinyGSM has no A76XX support.
 - APN: ask your carrier; MVNOs often need `GPRS_USER`/`GPRS_PASS`.
-- Sleep is guaranteed: a 3-minute awake guard forces deep sleep even if LTE hangs.
+- Sleep is guaranteed: a 3-minute awake guard forces deep sleep even if LTE hangs (an OTA pull suspends it, but has its own 15-minute cap).
 
 ## Platform (any Docker host / VPS)
 
@@ -85,9 +85,13 @@ Notes:
 cd infra
 cp .env.example .env        # fill every value (openssl rand -hex 24 for tokens)
 
-# create MQTT credentials (matches MQTT_USER/MQTT_PASSWORD in .env):
-docker run --rm -v ./mosquitto/config:/cfg eclipse-mosquitto:2.0 \
-  mosquitto_passwd -c -b /cfg/passwd freezer '<your MQTT_PASSWORD>'
+# create the three MQTT identities (values from .env). Each is confined to its own
+# topics by mosquitto/config/acl: devices write telemetry/alert + read cmd,
+# telegraf is read-only, publisher may only write cmd (OTA). Never share one.
+docker run --rm -v ./mosquitto/config:/cfg eclipse-mosquitto:2.0 sh -c '
+  mosquitto_passwd -c -b /cfg/passwd freezer   "<MQTT_PASSWORD>" &&
+  mosquitto_passwd    -b /cfg/passwd telegraf  "<TELEGRAF_MQTT_PASSWORD>" &&
+  mosquitto_passwd    -b /cfg/passwd publisher "<PUBLISHER_MQTT_PASSWORD>"'
 
 # the file is created root-owned; the broker drops privileges and must be able to read it:
 docker run --rm -v ./mosquitto/config:/cfg eclipse-mosquitto:2.0 \
@@ -199,7 +203,9 @@ GPS itself is received, not transmitted. **Assisted GNSS** (`AT+CAGPS`) download
 Full model and the independent-review findings are in [docs/HARDENING.md](docs/HARDENING.md). In brief:
 
 - **Signed OTA** is the primary control: every image is RSA-2048/SHA-256 signed and verified on-device (with the version bound in, for anti-rollback) before install — over both LTE *and* the WiFi `/update` form. So even though the MQTT command channel isn't broker-authenticated (the modem's TLS runs `authmode=0`), a MITM can't push forged, tampered, or downgraded firmware. **Generate your own signing key first:** `bun infra/scripts/GenSigningKey.ts` (the committed `ota_pubkey.h` is a placeholder).
-- Broker requires authentication; the stack refuses to start with unset secrets (`${VAR:?}`). MQTT runs over TLS (port 8883) — the fork's secure client encrypts but doesn't validate the broker cert by default, so signed-OTA is what guarantees firmware integrity regardless; for full MQTT MITM protection, load a CA cert via the modem's certificate store.
+- Broker requires authentication **and authorization**: `mosquitto/config/acl` confines every identity to its own topics (per-device users via `pattern … %u`; the shared device credential can never write a `cmd` topic; Telegraf is read-only; `PublishFirmware.ts` uses a `publisher` identity that can only write `cmd`). A leaked device credential therefore cannot arm an OTA or silence another unit's alerts. The stack refuses to start with unset secrets (`${VAR:?}`). The committed default is **plaintext 1883** (the `8883` listener is a commented upgrade path in `mosquitto.conf`, and `platformio.ini`'s default env is the non-TLS build) — for anything Internet-facing, enable 8883 and build `t-a7608-tls`; the fork's secure client encrypts but doesn't validate the broker cert by default, so signed-OTA is what guarantees firmware integrity regardless; for full MQTT MITM protection, load a CA cert via the modem's certificate store.
+- **The firmware image contains the compiled-in secrets** (`MQTT_PASS`, `DEBUG_AP_PASSWORD`, APN) and the OTA pieces are fetched over plain HTTP behind `OTA_PATH_TOKEN`. Anyone who learns the token (on-path observer of one OTA, or a MITM of the unauthenticated MQTT session) can reassemble the pieces and read those secrets — so treat the token as a bearer secret, and treat the credentials in the image as *remotely* exposed until per-device NVS-provisioned credentials land (HARDENING P3). `PublishFirmware.ts` no longer leaves the unsplit `firmware.bin` in the served directory.
+- Cellular OTA is **bounded**: one pull is capped at `MAX_OTA_MS` (15 min) and a version that has failed `OTA_MAX_FAILS` (3) times is refused until a different version is commanded — a retained `cmd` pointing at a broken image costs three bounded attempts, not the battery.
 - `config.h`, `.env`, and `infra/keys/` (the OTA **private** signing key) are gitignored; only `.example` templates and the **public** key are committed.
 - Known follow-ups (see HARDENING.md): per-device credentials, and a unique high-entropy `DEBUG_AP_PASSWORD` per unit.
 

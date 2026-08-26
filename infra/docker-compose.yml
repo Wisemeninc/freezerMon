@@ -30,8 +30,9 @@ services:
     restart: unless-stopped
     depends_on: [mosquitto, influxdb]
     environment:
-      MQTT_USER: ${MQTT_USER:?set in .env}
-      MQTT_PASSWORD: ${MQTT_PASSWORD:?set in .env}
+      # read-only ingest identity (see mosquitto/config/acl) — never the device credential
+      MQTT_USER: ${TELEGRAF_MQTT_USER:-telegraf}
+      MQTT_PASSWORD: ${TELEGRAF_MQTT_PASSWORD:?set in .env}
       INFLUX_TOKEN: ${INFLUX_TOKEN:?set in .env}
       INFLUX_ORG: ${INFLUX_ORG:-freezermon}
       INFLUX_BUCKET: ${INFLUX_BUCKET:-telemetry}

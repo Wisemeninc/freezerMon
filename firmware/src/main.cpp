@@ -28,13 +28,15 @@
 #include <WebServer.h>
 #include <Preferences.h>         // NVS-backed device name (survives OTA; set via /setname)
 #include <Update.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>    // modemLock: the dbgweb task and the main thread share one modem UART
 #include "mbedtls/md.h"          // streaming SHA-256 (version-stable md_* API)
 #include "mbedtls/pk.h"          // RSA-2048 signature verify
 #include "ota_pubkey.h"          // OTA_PUBKEY_PEM — image-signing public key
 #include "deviceid.h"            // deviceNameValid(), chipSeedName() — host-testable
 #include "geo.h"                 // geoDistM() — movement detection, host-testable
 
-#define FW_VERSION "2.68"
+#define FW_VERSION "2.69"
 
 #define SerialMon Serial
 #define SerialAT  Serial1
@@ -163,7 +165,28 @@ static void mqttCallback(char *topic, byte *payload, unsigned int len) {
 // ---------- field-debug console state ----------
 WebServer debugServer(80);
 bool debugApActive = false;
-volatile bool modemBusy = false;   // main thread owns the modem UART while set
+volatile bool modemBusy = false;   // main thread owns the modem UART while set — written ONLY by the
+                                   // main thread; /update's flash-claim reads it under flashMux
+// The dbgweb task (/lte /gps /sms) and the main thread share one modem UART. modemBusy
+// is a flag, not a lock: a console handler that raced past it and then cleared it
+// released the main thread's claim mid-OTA (2026-08-26 review). This recursive mutex
+// is the owner token: the main thread holds it for a whole modem session (and nests
+// it inside performOta/checkOnlineUpdate); console handlers try-take with zero wait
+// and answer "busy". Never assigned from a task that did not acquire it.
+static SemaphoreHandle_t modemLock = nullptr;
+static bool consoleTakeModem() { return modemLock && xSemaphoreTakeRecursive(modemLock, 0) == pdTRUE; }
+static void consoleGiveModem() { if (modemLock) xSemaphoreGiveRecursive(modemLock); }
+static void mainTakeModem()    { if (modemLock) xSemaphoreTakeRecursive(modemLock, portMAX_DELAY); }
+static void mainGiveModem()    { if (modemLock) xSemaphoreGiveRecursive(modemLock); }
+
+// Same-origin gate for every state-changing console endpoint (/setname, /update,
+// /update/check). Fail-closed: a request with NO Origin header is refused as well —
+// browsers always send it on cross-origin POSTs, so a missing header is a client we
+// cannot vouch for. Stops a drive-by page on the AP from erasing the inactive OTA
+// slot or renaming the unit.
+static bool sameOriginRequest() {
+  return debugServer.hasHeader("Origin") && debugServer.header("Origin") == "http://192.168.4.1";
+}
 
 // Runtime device identity. Resolved once per boot from NVS (survives OTA, since
 // OTA only rewrites the app partition) so ONE firmware image can serve a whole
@@ -172,20 +195,28 @@ volatile bool modemBusy = false;   // main thread owns the modem UART while set
 char deviceId[32] = "cooler-01";   // safe placeholder until resolveDeviceId() runs
 
 #define LOG_RING 96      // holds a full multi-chunk OTA trace in /log
-static String  logRing[LOG_RING];
+#define LOG_LINE 160
+// Fixed-size ring, no heap: logLine() runs on BOTH the main thread and the dbgweb
+// task while /log reads it. A String ring reallocated under a concurrent copy is a
+// use-after-free that panics the unit exactly when someone is reading the log
+// (2026-08-26 independent review).
+static char    logRing[LOG_RING][LOG_LINE];
 static uint8_t logHead = 0, logCount = 0;
+static portMUX_TYPE logMux = portMUX_INITIALIZER_UNLOCKED;
 
 // log to serial AND the ring buffer served at /log (no trailing newline in fmt)
 static void logLine(const char *fmt, ...) {
-  char buf[160];
+  char buf[LOG_LINE];
   va_list ap;
   va_start(ap, fmt);
   vsnprintf(buf, sizeof(buf), fmt, ap);
   va_end(ap);
   SerialMon.println(buf);
-  logRing[logHead] = buf;
+  portENTER_CRITICAL(&logMux);
+  memcpy(logRing[logHead], buf, LOG_LINE);            // NUL-terminated by vsnprintf
   logHead = (logHead + 1) % LOG_RING;
   if (logCount < LOG_RING) logCount++;
+  portEXIT_CRITICAL(&logMux);
 }
 
 // ---------- device identity (NVS-backed) ----------
@@ -511,8 +542,17 @@ static void startDebugAp() {
   debugServer.on("/log", []() {
     debugServer.sendHeader("Refresh", "15");            // browser auto-reload while monitoring
     String out;
-    for (uint8_t i = 0; i < logCount; i++) {
-      out += logRing[(logHead + LOG_RING - logCount + i) % LOG_RING];
+    out.reserve(LOG_RING * 64);
+    char line[LOG_LINE];
+    portENTER_CRITICAL(&logMux);
+    uint8_t count = logCount, head = logHead;
+    portEXIT_CRITICAL(&logMux);
+    for (uint8_t i = 0; i < count; i++) {
+      portENTER_CRITICAL(&logMux);                       // one entry per critical section — never hold it across String work
+      memcpy(line, logRing[(head + LOG_RING - count + i) % LOG_RING], LOG_LINE);
+      portEXIT_CRITICAL(&logMux);
+      line[LOG_LINE - 1] = 0;
+      out += line;
       out += '\n';
     }
     debugServer.send(200, "text/plain", out);
@@ -521,16 +561,16 @@ static void startDebugAp() {
     debugServer.sendHeader("Refresh", "15");            // browser auto-reload while monitoring
     JsonDocument doc;
     doc["fw"] = FW_VERSION;
-    if (modemBusy) {
-      // main thread owns the modem UART right now (attach/publish in progress)
-      doc["busy"] = true;
-      doc["note"] = "modem attach/publish in progress - refresh in ~30s";
-    } else if (poweredSession) {
+    if (poweredSession) {
       // powered regime: main loop services MQTT on the UART continuously —
       // report link state without injecting AT commands into that stream
       doc["powered"]        = true;
       doc["mqtt_connected"] = mqtt.connected();
       doc["note"] = "live modem queries suspended while MQTT session is held";
+    } else if (!consoleTakeModem()) {
+      // main thread owns the modem UART right now (attach/publish/OTA in progress)
+      doc["busy"] = true;
+      doc["note"] = "modem attach/publish in progress - refresh in ~30s";
     } else {
       doc["sim_status"] = (int)modem.getSimStatus();      // 1 = ready
       int csq = modem.getSignalQuality();
@@ -551,14 +591,13 @@ static void startDebugAp() {
       doc["network_time"] = atQuery("+CCLK?");            // clock as set by the network
 
       // ---- assigned-IP / PDP context detail (APN, IP, subnet, gateway, DNS) ----
-      modemBusy = true;                                   // hold the UART for the query burst
       doc["apn_cfg"]     = APN;                           // compiled-in APN
       doc["pdp_addr"]    = atQuery("+CGPADDR");           // context IP address(es)
       doc["pdp_dhcp"]    = atQuery("+CGCONTRDP");         // APN, local IP + subnet mask, gateway, DNS1, DNS2
       doc["pdp_active"]  = atQuery("+CGACT?");            // context activation state
       doc["pdp_define"]  = atQuery("+CGDCONT?");          // configured contexts / APNs
       doc["dns_lookup"]  = atQuery("+CDNSGIP=\"" MQTT_HOST "\"", 5000);  // resolve via the network-provided DNS
-      modemBusy = false;
+      consoleGiveModem();
     }
     doc["mqtt_host"] = MQTT_HOST;
     doc["mqtt_port"] = MQTT_PORT;
@@ -571,14 +610,14 @@ static void startDebugAp() {
     debugServer.sendHeader("Refresh", "15");            // browser auto-reload while monitoring
     JsonDocument doc;
     doc["fw"] = FW_VERSION;
-    if (modemBusy) {
-      doc["busy"] = true;
-      doc["note"] = "modem attach/publish in progress - refresh in ~30s";
-    } else if (poweredSession) {
+    if (poweredSession) {
       doc["powered"] = true;
       doc["note"] = "GNSS debug unavailable while MQTT session is held (UART owned by main loop)";
       doc["last_lat"] = lastLat;
       doc["last_lon"] = lastLon;
+    } else if (!consoleTakeModem()) {
+      doc["busy"] = true;
+      doc["note"] = "modem attach/publish in progress - refresh in ~30s";
     } else {
       if (!gnssDebugOn)                                   // stays on while console is up
         gnssDebugOn = modem.enableGPS(GPS_ANTENNA_POWER_PIN, GPS_ANTENNA_POWER_LEVEL);
@@ -591,7 +630,8 @@ static void startDebugAp() {
         doc["lon"] = lon;
         doc["sats"] = sats;
         doc["raw"] = atQuery("+CGNSSINFO");
-        lastLat = lat; lastLon = lon;                    // console-triggered fix feeds the next report
+        // deliberately NOT written to lastLat/lastLon: a console-triggered fix is not
+        // a report and must not shift the movement-detection baseline
       } else {
         doc["fix"] = false;
         String raw = atQuery("+CGNSSINFO");
@@ -620,6 +660,7 @@ static void startDebugAp() {
       }
       doc["last_reported_lat"] = lastLat;
       doc["last_reported_lon"] = lastLon;
+      consoleGiveModem();
     }
     String out;
     serializeJsonPretty(doc, out);
@@ -628,12 +669,22 @@ static void startDebugAp() {
 
   debugServer.on("/sms", []() {
     // SIM activation flows deliver a text — surface the inbox here so no
-    // phone is needed to complete registration in the field
+    // phone is needed to complete registration in the field. Same UART rules
+    // as /lte: never inject AT commands into a session the main thread owns.
+    if (poweredSession) {
+      debugServer.send(503, "text/plain", "unavailable while the MQTT session is held (powered regime)\n");
+      return;
+    }
+    if (!consoleTakeModem()) {
+      debugServer.send(503, "text/plain", "modem busy (attach/publish/OTA in progress) - retry in ~30s\n");
+      return;
+    }
     modem.sendAT("+CMGF=1");                  // text mode
     modem.waitResponse();
     modem.sendAT("+CMGL=\"ALL\"");            // list all stored messages
     String res;
     modem.waitResponse(10000L, res);
+    consoleGiveModem();
     res.replace("\r", "");
     debugServer.send(200, "text/plain",
                      res.length() > 4 ? res : "no SMS stored\n");
@@ -656,8 +707,7 @@ static void startDebugAp() {
       "Changes the MQTT topics and the Grafana device tag.</small>");
   });
   debugServer.on("/setname", HTTP_POST, []() {
-    if (debugServer.hasHeader("Origin") &&
-        debugServer.header("Origin") != "http://192.168.4.1") {
+    if (!sameOriginRequest()) {
       debugServer.send(403, "text/plain", "cross-origin request refused\n");
       return;
     }
@@ -700,6 +750,7 @@ static void startDebugAp() {
       );
   });
   debugServer.on("/update/check", HTTP_POST, []() {
+    if (!sameOriginRequest()) { debugServer.send(403, "text/plain", "cross-origin request refused\n"); return; }
 #ifdef OTA_MANIFEST_URL
     otaCheckRequested = true;
     debugServer.send(200, "text/plain",
@@ -709,6 +760,12 @@ static void startDebugAp() {
 #endif
   });
   debugServer.on("/update", HTTP_POST, []() {
+    if (!sameOriginRequest()) {                          // upload callback already refused; make the answer explicit
+      Update.abort();
+      upBinDone = false; upSigLen = 0; otaUploadActive = false; upFwBlocked = false;
+      debugServer.send(403, "text/plain", "cross-origin request refused\n");
+      return;
+    }
     // Both files in; install ONLY if the uploaded image's SHA-256 verifies against the
     // uploaded signature and the embedded public key — then commit and reboot.
     bool ok = !upFwBlocked && upBinDone && upSigLen == 256 && !Update.hasError() &&
@@ -726,6 +783,9 @@ static void startDebugAp() {
     HTTPUpload &up = debugServer.upload();
     bool isSig = up.name == "sig";
     if (up.status == UPLOAD_FILE_START) {
+      // Checked here, not only in the POST handler: the partition erase (Update.begin)
+      // happens in this callback, before the handler ever runs.
+      if (!sameOriginRequest()) { upFwBlocked = true; logLine("[ota] /update refused - cross-origin"); return; }
       logLine("[ota] receiving %s (%s)", up.filename.c_str(), up.name.c_str());
       if (isSig) { upSigLen = 0; }
       else {
@@ -845,11 +905,13 @@ static void checkOnlineUpdate() {
   if (colon) { *colon = 0; port = (uint16_t)atoi(colon + 1); }
 
   logLine("[ota] manifest check %s:%u", host, port);
+  bool priorBusy = modemBusy;                           // restore, don't clear: the caller may own the session
+  mainTakeModem();
   modemBusy = true;
   bool up = otaConnect(host, port);
   if (!up) {
     logLine("[ota] manifest connect failed");
-    modemBusy = false;
+    modemBusy = priorBusy; mainGiveModem();
     return;
   }
   otaHttpClient.print(String("GET ") + path + " HTTP/1.0\r\nHost: " + host + "\r\nConnection: close\r\n\r\n");
@@ -858,7 +920,7 @@ static void checkOnlineUpdate() {
   if (status.indexOf("200") < 0) {
     logLine("[ota] manifest http %s", status.c_str());
     otaHttpClient.stop();
-    modemBusy = false;
+    modemBusy = priorBusy; mainGiveModem();
     return;
   }
   while (true) {                                        // skip headers
@@ -874,7 +936,7 @@ static void checkOnlineUpdate() {
     delay(10);
   }
   otaHttpClient.stop();
-  modemBusy = false;
+  modemBusy = priorBusy; mainGiveModem();
 
   JsonDocument doc;
   if (deserializeJson(doc, bodyStr)) {
@@ -1014,7 +1076,34 @@ static bool otaVerifySig(Stream &at, const char *url, const uint8_t *digest) {
   return otaCheckSig(digest, sig, 256);
 }
 
+#ifndef OTA_MAX_FAILS
+#define OTA_MAX_FAILS 3        // refuse a version after this many failed pulls (until a different version is commanded)
+#endif
+#ifndef MAX_OTA_MS
+#define MAX_OTA_MS 900000UL    // hard cap on one OTA pull (15 min) — the 3-min awake guard is suspended during OTA
+#endif
+// The retained cmd is re-delivered on every subscribe, so without a memory of
+// failures a permanently-bad image (stalling server, wrong size, bad signature)
+// re-runs the full multi-minute pull on every wake — an unbounded battery drain,
+// remotely triggerable by anyone who can write the cmd topic (2026-08-26 review).
+static void otaNoteFailure(const char *ver) {
+  Preferences p; p.begin("freezermon", false);
+  String fv = p.getString("otafv", ""); uint8_t fc = p.getUChar("otafc", 0);
+  if (fv != ver) { fc = 0; p.putString("otafv", ver); }
+  if (fc < 255) fc++;
+  p.putUChar("otafc", fc); p.end();
+  logLine("[ota] %s failure #%u recorded", ver, fc);
+}
+static bool otaRefused(const char *ver) {
+  Preferences p; p.begin("freezermon", true);
+  String fv = p.getString("otafv", ""); uint8_t fc = p.getUChar("otafc", 0); p.end();
+  if (fv == ver && fc >= OTA_MAX_FAILS) { logLine("[ota] %s refused - failed %u times", ver, fc); return true; }
+  return false;
+}
+
 static bool performOta(const char *url, const char *ver) {
+  if (otaRefused(ver)) return false;
+  bool priorBusy = modemBusy;                  // restore, don't clear: the caller may still own the session
   // Atomically claim exclusive flash access vs. a local /update flash (dbgweb task).
   // A stale otaUploadActive (dropped upload) is ignored after 3 min.
   portENTER_CRITICAL(&flashMux);
@@ -1022,6 +1111,8 @@ static bool performOta(const char *url, const char *ver) {
   if (!busy) modemBusy = true;                 // claim it before releasing the lock
   portEXIT_CRITICAL(&flashMux);
   if (busy) { logLine("[ota] deferred - local /update flash in progress"); return false; }
+  mainTakeModem();
+  const uint32_t otaStart = millis();
   Stream &at = SerialAT;
   const long RD = 4096;                  // one HTTPREAD chunk: the modem sends 4 KB
                                          // then waits for the next command, so it
@@ -1030,7 +1121,7 @@ static bool performOta(const char *url, const char *ver) {
   long total = otaSize;                  // total image size, from the retained cmd
   modemBusy = true;
   logLine("[ota] %s size %ld heap %u (pieces)", ver, total, ESP.getFreeHeap());
-  if (total <= 0) { logLine("[ota] no size in cmd"); modemBusy = false; return false; }
+  if (total <= 0) { logLine("[ota] no size in cmd"); otaNoteFailure(ver); modemBusy = priorBusy; mainGiveModem(); return false; }
   // Free the AT channel of the MQTT/CCH session (separate modem service).
   if (mqtt.connected()) mqtt.disconnect();
   delay(300);
@@ -1042,7 +1133,7 @@ static bool performOta(const char *url, const char *ver) {
                                          // cleanly end-to-end, so a failed read is re-fetched
                                          // from offset 0 — the modem's offset-resume after a
                                          // re-fetch is unreliable and corrupted the image.
-  if (!Update.begin(total)) { logLine("[ota] begin fail heap %u", ESP.getFreeHeap()); modemBusy = false; return false; }
+  if (!Update.begin(total)) { logLine("[ota] begin fail heap %u", ESP.getFreeHeap()); otaNoteFailure(ver); modemBusy = priorBusy; mainGiveModem(); return false; }
   if (otaMd5[0]) Update.setMD5(otaMd5);  // verify the whole image; never install a corrupt one
 
   // Stream SHA-256 over (ota_ver ‖ 0x00 ‖ image) — the version is part of the signed
@@ -1051,7 +1142,7 @@ static bool performOta(const char *url, const char *ver) {
   mbedtls_md_context_t md; mbedtls_md_init(&md);
   if (mbedtls_md_setup(&md, mbedtls_md_info_from_type(MBEDTLS_MD_SHA256), 0) != 0 ||
       mbedtls_md_starts(&md) != 0) {
-    logLine("[ota] sha init fail"); mbedtls_md_free(&md); Update.abort(); modemBusy = false; return false;
+    logLine("[ota] sha init fail"); mbedtls_md_free(&md); Update.abort(); otaNoteFailure(ver); modemBusy = priorBusy; mainGiveModem(); return false;
   }
   { uint8_t z = 0;
     mbedtls_md_update(&md, (const uint8_t *)ver, strlen(ver));   // ver == otaVer (from cmd)
@@ -1070,12 +1161,14 @@ static bool performOta(const char *url, const char *ver) {
   // fetch — the first GET right after attach is the flakiest (piece 0 historically
   // eats the most retries). A one-time pause here converges the pull faster.
   delay(2500);
-  while (done < total && ok) {
+  // Time-boxed: this is the one long path that feeds the watchdog on every retry, so
+  // without its own budget a stalling server keeps the radio hot for hours per wake.
+  while (done < total && ok && millis() - otaStart < MAX_OTA_MS) {
     char purl[224];
     snprintf(purl, sizeof(purl), "%s.%03d", url, piece);
     long pieceStart = done;                      // flash position where this piece begins
     bool pieceOk = false;
-    for (int tries = 1; tries <= MAX_TRIES && !pieceOk && ok; tries++) {
+    for (int tries = 1; tries <= MAX_TRIES && !pieceOk && ok && millis() - otaStart < MAX_OTA_MS; tries++) {
       esp_task_wdt_reset();
       at.println("AT+HTTPTERM"); otaWaitToken(at, "OK", 3000); otaDrain(at);
       at.println("AT+HTTPINIT");
@@ -1148,8 +1241,10 @@ static bool performOta(const char *url, const char *ver) {
   }
   int uerr = Update.getError();          // 11 = MD5 mismatch (corrupt assembly)
   Update.abort();
-  logLine("[ota] failed at %ld/%ld ok=%d uerr=%d", done, total, ok, uerr);
-  modemBusy = false;
+  logLine("[ota] failed at %ld/%ld ok=%d uerr=%d%s", done, total, ok, uerr,
+          millis() - otaStart >= MAX_OTA_MS ? " (OTA time budget exhausted)" : "");
+  otaNoteFailure(ver);
+  modemBusy = priorBusy; mainGiveModem();
   return false;
 }
 
@@ -1451,6 +1546,7 @@ void setup() {
   bootCount++;
   SerialMon.begin(115200);
   resolveDeviceId();     // NVS -> deviceId, before the AP SSID / MQTT topics use it
+  if (!modemLock) modemLock = xSemaphoreCreateRecursiveMutex();   // before the dbgweb task can exist
 
   // silicon-enforced sleep guarantee: if any modem call wedges past the awake
   // budget, the task WDT resets the chip instead of draining the battery
@@ -1500,7 +1596,8 @@ void setup() {
 
   bool published = false;
   if (awakeBudgetLeft()) {
-    modemBusy = true;                                   // /lte reports busy during attach
+    mainTakeModem();                                    // console handlers answer "busy" until released
+    modemBusy = true;                                   // /update's flash-claim check reads this
     modemPowerOn();
     if (modemConnect()) {
       markPhase(2);                                     // attached — later death = RF-load, not inrush
@@ -1629,6 +1726,7 @@ void setup() {
       logLine("[net] no connectivity this cycle");
     }
     modemBusy = false;                                  // console may query the modem again
+    mainGiveModem();
   }
   markPhase(3);                                         // modem work done
 
@@ -1639,6 +1737,7 @@ void setup() {
   // (instant alerts instead of wake latency) and report on the powered cadence.
   if (s.extPower && published && mqtt.connected()) {
     poweredSession = true;
+    mainTakeModem();                                    // loop() owns the UART for the rest of this boot
     lastDoor = s.doorOpen;
     prevAlarm = s.alarm;
     lastReportMs = millis();
@@ -1686,8 +1785,8 @@ void loop() {
   if (Update.isRunning()) { delay(5); return; }         // OTA in progress — don't report or sleep
 #ifdef OTA_MANIFEST_URL
   if (otaCheckRequested) {
-    checkOnlineUpdate();                                // drops the MQTT session (shared client)
-    if (!otaPending) {                                  // no update -> restore it in place
+    checkOnlineUpdate();                                // own client on mux 1 — the MQTT session normally survives
+    if (!otaPending && !mqtt.connected()) {             // restore only if it actually dropped
       char clientId[48];
       snprintf(clientId, sizeof(clientId), "freezermon-%s", deviceId);
       if (mqtt.connect(clientId, MQTT_USER, MQTT_PASS)) {

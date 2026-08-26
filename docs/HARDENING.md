@@ -11,8 +11,26 @@ means arbitrary code execution on the device.
 | **P0** | **OTA command channel is unauthenticated** (`authmode=0`). A MITM can push a malicious OTA cmd; MD5 gives no protection. | **✅ DONE — signed OTA (2.49)** |
 | **P1** | **`/update` local flash accepts any image** (behind the shared WPA2 AP password). | **✅ DONE — signed `/update` (2.49)** |
 | **P2** | **Downgrade allowed** (`ota_ver != FW_VERSION`) → old signed-but-vulnerable version can be pushed. | **✅ DONE — `verNewer()` + version bound into the signature (2.50)** |
-| **P3** | **Secrets compiled into the binary** (MQTT + AP passwords). Extractable via flash dump / physical access. Note: the committed *example* `DEBUG_AP_PASSWORD` is weak — must be unique + high-entropy per unit. | Open — per-device creds |
-| P4 | Info disclosure on the debug console (`/lte`, `/gps`, `/log`) — behind WPA2. | Low |
+| **P3** | **Secrets compiled into the binary** (MQTT + AP passwords). **Re-rated 2026-08-26: remotely extractable, not just via flash dump** — the OTA pieces are served over plain HTTP behind `OTA_PATH_TOKEN`, which travels in the clear on every fetch and inside the unauthenticated MQTT session. Note: the committed *example* `DEBUG_AP_PASSWORD` is weak — must be unique + high-entropy per unit. | **Open — per-device NVS-provisioned creds is the real fix.** Mitigated: unsplit `firmware.bin` no longer published; broker ACLs (P6) confine a leaked credential to telemetry/alert of the shared identity. |
+| P4 | Info disclosure on the debug console (`/lte`, `/gps`, `/sms`, `/log`) — behind WPA2. **Re-rated 2026-08-26:** on externally-powered units the AP and every endpoint are up 24/7 (`main.cpp` "console always on while powered"), not for a 120 s window, behind one fleet-wide PSK. | Medium on powered units — on-demand AP + per-unit PSK pending |
+| **P5** | **Availability: OTA pull was unbounded.** `performOta` fed the watchdog on every retry and never checked the awake budget; the retained `cmd` re-arms on every subscribe. A `cmd` pointing at a stalling server = hours awake per wake, forever, remotely (anyone who can write `cmd`, or the P0 MITM). | **✅ DONE (2.69)** — `MAX_OTA_MS` cap + NVS failure memory (`OTA_MAX_FAILS`) |
+| **P6** | **No broker authorization.** One shared credential (devices + Telegraf) with no `acl_file` could write any `freezer/*/cmd` (fleet-wide P5) and forge any unit's telemetry (the Grafana breach rule reduces `last()`, so a forged low reading clears a real alert). | **✅ DONE** — `mosquitto/config/acl`: per-device `pattern %u` rules, shared device user cannot write `cmd`, read-only `telegraf`, `cmd`-only `publisher` |
+| **P7** | **Debug-console concurrency.** dbgweb task and main thread shared the modem UART, the flash writer and the log ring behind an advisory `modemBusy` bool that `/lte` cleared unconditionally and `/sms` ignored; `String logRing[]` was a use-after-free between `logLine` and `/log`. Reachable by anyone with the AP PSK. | **✅ DONE (2.69)** — recursive FreeRTOS mutex owns the UART (console try-takes, answers busy; `/sms` guarded), fixed `char` ring under a spinlock, `modemBusy` written by the main thread only and restored (not cleared) by nested OTA paths |
+| P8 | CSRF on the console: `/setname` Origin check failed open on a missing header; `/update` and `/update/check` had no check — a drive-by page on the AP could erase the inactive OTA slot and block cellular OTA for 3 min. | **✅ DONE (2.69)** — `sameOriginRequest()` fail-closed on all three, enforced in the upload callback before `Update.begin` |
+| P9 | `PublishFirmware.ts` built a remote root shell command by string concatenation from unvalidated argv (`JSON.stringify` is not shell quoting). | **✅ DONE** — argv validated against the firmware's own contracts, payload on stdin, `publisher` identity |
+
+## Round 3 — full-codebase `/independent-review` gate (2026-08-26)
+
+Two reviewers that did not author the code (`Cato` correctness/design, `Silas` security) audited the
+entire tree at `cdb379f`. Both independently confirmed the signed-OTA core: exactly two `Update.end(true)`
+sites, both behind `otaCheckSig` over `version‖0x00‖image`; anti-rollback correct; piece reassembly bounded;
+`deviceNameValid` blocks topic/SSID injection; no secrets in tracked files. Verdict was **CHANGES REQUESTED**
+on 6 HIGHs, none in the crypto — P5–P9 above are those findings, fixed in fw 2.69 + this infra revision.
+Still open from that gate: P3 (per-device NVS credentials — the only real fix for secrets-in-image), P4
+(on-demand AP / per-unit PSK on powered units), TLS-by-default for the broker, scoped InfluxDB tokens,
+Telegraf-side `device` tag validation, and a handful of MEDIUM correctness items in the firmware
+(`/status` re-reading OneWire from the console task, door-wake buffer timestamp drift, ddmm parse heuristic,
+`reportsSinceGps` not NVS-mirrored, Grafana offline-rule lookback). Full table in the session log.
 
 ## Independent review (2026-07-14) — outcomes
 
@@ -93,12 +111,12 @@ the public key is baked into the firmware — a MITM can swap the sig, but can't
 one that verifies. This defeats both the MITM'd-command attack (P0) and, once
 `/update` checks it too, the local-flash attack (P1).
 
-## P1 — Gate `/update` on the signature (planned)
+## P1 — Gate `/update` on the signature (done, 2.49)
 
 Route the browser/WiFi flash through the same signature check so only signed images
 install by any path.
 
-## P2 — Anti-rollback (planned)
+## P2 — Anti-rollback (done, 2.50)
 
 Reject `ota_ver` numerically older than the running `FW_VERSION` unless an explicit
 override is set.

@@ -26,21 +26,34 @@ if (!ver) {
   console.error("usage: bun infra/scripts/PublishFirmware.ts <version> [device]");
   process.exit(1);
 }
+// Both values end up in a remote command line and in an MQTT topic. Validate against
+// the firmware's own contracts (verNewer's "%d.%d" parse, deviceNameValid's charset)
+// rather than trusting argv — this script runs as root on the telemetry host.
+if (!/^\d{1,3}\.\d{1,3}$/.test(ver)) {
+  console.error(`version must be <major>.<minor> digits only (got ${JSON.stringify(ver)})`);
+  process.exit(1);
+}
+if (!/^[a-z0-9-]{1,21}$/.test(device)) {
+  console.error(`device must match [a-z0-9-]{1,21} (got ${JSON.stringify(device)})`);
+  process.exit(1);
+}
 if (!existsSync(BIN)) {
   console.error(`${BIN} not found — build with: pio run -e t-a7608-tls`);
   process.exit(1);
 }
 
-const token = (await $`ssh ${SERVER} grep ^OTA_PATH_TOKEN= /opt/freezermon/.env`.text())
-  .trim()
-  .split("=")[1];
-if (!token) {
-  console.error("OTA_PATH_TOKEN missing in server /opt/freezermon/.env");
+const tokenLine = (await $`ssh ${SERVER} grep ^OTA_PATH_TOKEN= /opt/freezermon/.env`.text()).trim();
+const token = tokenLine.slice(tokenLine.indexOf("=") + 1);
+if (!/^[A-Za-z0-9_-]{16,}$/.test(token)) {
+  console.error("OTA_PATH_TOKEN missing or malformed in server /opt/freezermon/.env (expect >=16 chars of [A-Za-z0-9_-])");
   process.exit(1);
 }
 
 await $`ssh ${SERVER} mkdir -p /opt/freezermon/ota/${token}`;
-await $`scp -q ${BIN} ${SERVER}:/opt/freezermon/ota/${token}/firmware.bin`;
+// The unsplit image is NOT published: it holds every compiled-in credential and the
+// token-path is served over plain HTTP. The device only needs the pieces + .sig;
+// the WiFi /update form is fed straight from the build host. Remove a stale copy too.
+await $`ssh ${SERVER} rm -f /opt/freezermon/ota/${token}/firmware.bin`;
 
 // The A7608 can't pull the whole image in one request (its HTTP cache can't hold
 // a big response and won't cache 206 partials), so we split it into small plain
@@ -98,11 +111,20 @@ await $`scp -q ${dir}/firmware.bin.* ${SERVER}:/opt/freezermon/ota/${token}/`;
 const url = `http://${HOST}/fw/${token}/firmware.bin`;
 
 // The device fetches <url>.000, .001, … reading (plen - ota_skip) real bytes each
-// until ota_size total. Full firmware.bin stays for browser/WiFi flashing.
+// until ota_size total (the unsplit firmware.bin is deliberately not served).
 const cmd = JSON.stringify({ ota_url: url, ota_ver: ver, ota_size: total, ota_skip: OVERLAP, ota_md5: md5 });
 const manifest = JSON.stringify({ ota_ver: ver, ota_url: url, ota_size: total, ota_skip: OVERLAP, ota_md5: md5 });
 await $`ssh ${SERVER} tee /opt/freezermon/ota/${token}/manifest.json < ${new Response(manifest + "\n")}`.quiet();
-await $`ssh ${SERVER} bash -c ${"'source /opt/freezermon/.env && docker exec freezermon-mosquitto-1 mosquitto_pub -u freezer -P \"$MQTT_PASSWORD\" -r -t freezer/" + device + "/cmd -m " + JSON.stringify(cmd) + "'"}`;
+// Retained command, published as the `publisher` identity (ACL: cmd topics only).
+// The remote command line contains exactly one caller-influenced value — the topic —
+// and it was validated above against [a-z0-9-]{1,21}; the payload travels on stdin.
+const topic = `freezer/${device}/cmd`;
+const remote =
+  "set -a; . /opt/freezermon/.env; set +a; " +
+  "exec docker exec -i -e PUB_USER=\"${PUBLISHER_MQTT_USER:-publisher}\" -e PUB_PASS=\"$PUBLISHER_MQTT_PASSWORD\" " +
+  "freezermon-mosquitto-1 sh -c 'exec mosquitto_pub -u \"$PUB_USER\" -P \"$PUB_PASS\" -r -t \"$0\" -s' " +
+  "'" + topic + "'";
+await $`ssh ${SERVER} ${remote} < ${new Response(cmd + "\n")}`.quiet();
 
 console.log(`OTA published: ${device} → v${ver}  (${total} bytes, ${nPieces} pieces of ${PIECE}, ${STEP}B step, ${OVERLAP}B overlap)`);
 console.log(`  image: ${url}`);

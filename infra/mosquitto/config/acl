@@ -1,0 +1,28 @@
+# freezerMon Mosquitto ACL — least privilege per identity.
+# Mosquitto grants NOTHING to a user with no matching entry, so every identity
+# that connects must appear here. Topic layout: freezer/<device>/{telemetry,alert,cmd}.
+
+# --- Per-device identities (recommended): username == device id -----------------
+# %u is the connecting username, so a device can only publish AS ITSELF and only
+# read its own command topic. A leaked credential is scoped to one unit.
+pattern write freezer/%u/telemetry
+pattern write freezer/%u/alert
+pattern read  freezer/%u/cmd
+
+# --- Legacy shared device credential (MQTT_USER in config.h) ---------------------
+# Kept for fleets still on one compiled-in credential. It can publish telemetry
+# for any device name (forgeable — migrate to per-device users), but it can NEVER
+# write a cmd topic: a leaked device credential cannot arm an OTA on the fleet.
+user freezer
+topic write freezer/+/telemetry
+topic write freezer/+/alert
+topic read  freezer/+/cmd
+
+# --- Ingest (Telegraf): read-only ------------------------------------------------
+user telegraf
+topic read freezer/+/telemetry
+topic read freezer/+/alert
+
+# --- Fleet operator (infra/scripts/PublishFirmware.ts): command topics only ------
+user publisher
+topic write freezer/+/cmd
