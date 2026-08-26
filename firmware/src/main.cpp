@@ -36,7 +36,7 @@
 #include "deviceid.h"            // deviceNameValid(), chipSeedName() — host-testable
 #include "geo.h"                 // geoDistM() — movement detection, host-testable
 
-#define FW_VERSION "2.71"
+#define FW_VERSION "2.72"
 
 #define SerialMon Serial
 #define SerialAT  Serial1
@@ -82,6 +82,14 @@ RTC_DATA_ATTR float    lastLat = 0, lastLon = 0; // most recent fix — movement
 static bool gpsFreshThisWake = false;            // set only by a successful fix THIS wake — a published coordinate is a measurement, not a memory
 static float lastFixHdop = 0;                    // quality of the fix behind lastLat/lastLon (published with it)
 RTC_DATA_ATTR uint8_t gpsMissStreak = 0;         // consecutive attempts with no gate-passing fix (indoors) — drives the backoff
+// Outcome of the most recent GNSS attempt, published in EVERY frame as gps_last /
+// gps_last_s / gps_last_hdop so a failed hunt is visible from the dashboard rather
+// than indistinguishable from "did not try" (the frame goes out before the hunt,
+// and only a success sends the follow-up). RTC: survives sleep, not brownouts.
+//   0 = no attempt yet   1 = no fix in window   2 = fix seen but rejected by the gate   3 = fix published
+RTC_DATA_ATTR uint8_t  gpsLastStatus = 0;
+RTC_DATA_ATTR uint16_t gpsLastSecs   = 0;
+RTC_DATA_ATTR float    gpsLastHdop   = 0;         // best HDOP seen in that window (rejected or not)
 #ifndef GPS_MISS_BACKOFF_AFTER
 #define GPS_MISS_BACKOFF_AFTER 3   // after this many straight misses, hunt only every GPS_MISS_BACKOFF_N wakes
 #endif
@@ -1425,7 +1433,8 @@ static bool maybeGps(uint32_t fixTimeoutS) {
   float lat, lon, hdop;
   int sats = 0, maxSats = 0, mode = 0;
   bool gotFix = false, rejectLogged = false;
-  float bestHdop = 1e9f, bestLat = 0, bestLon = 0;
+  float bestHdop = 1e9f, bestLat = 0, bestLon = 0, bestAnyHdop = 0;
+  bool anyFix = false;
   uint32_t firstGoodMs = 0;
   float prevLat = lastLat, prevLon = lastLon;           // previous fix, for movement detection
   uint32_t start = millis();
@@ -1434,6 +1443,8 @@ static bool maybeGps(uint32_t fixTimeoutS) {
     bool fix = readGnssFix(&lat, &lon, &sats, &hdop, &mode);
     if (sats > maxSats) maxSats = sats;
     if (fix) {
+      anyFix = true;
+      if (hdop > 0 && (bestAnyHdop == 0 || hdop < bestAnyHdop)) bestAnyHdop = hdop;
       bool good = (mode >= 3 || !GPS_REQUIRE_3D) && hdop > 0 && hdop <= GPS_MAX_HDOP;
       // A fix that exists but fails the gate is converging: give the short cold-boot
       // window the full periodic window rather than throwing the fix away at 30 s.
@@ -1453,6 +1464,9 @@ static bool maybeGps(uint32_t fixTimeoutS) {
     delay(2000);
   }
   if (firstGoodMs) gpsMissStreak = 0; else if (gpsMissStreak < 255) gpsMissStreak++;
+  gpsLastStatus = firstGoodMs ? 3 : anyFix ? 2 : 1;
+  gpsLastSecs   = (uint16_t)((millis() - start) / 1000UL);
+  gpsLastHdop   = firstGoodMs ? bestHdop : bestAnyHdop;
   if (firstGoodMs) {
     lastLat = bestLat; lastLon = bestLon;
     lastFixHdop = bestHdop; lastFixSats = maxSats;
@@ -1524,6 +1538,11 @@ static bool publishSample(const Sample &s, uint32_t nowEpoch, bool buffered,
     doc["lon"] = lastLon;
     doc["hdop"] = serialized(String(lastFixHdop, 1));
     doc["sats"] = lastFixSats;
+  }
+  if (gpsLastStatus) {                                   // outcome of the most recent hunt (see gpsLastStatus)
+    doc["gps_last"]      = gpsLastStatus;
+    doc["gps_last_s"]    = gpsLastSecs;
+    if (gpsLastHdop > 0) doc["gps_last_hdop"] = serialized(String(gpsLastHdop, 1));
   }
   doc["alarm"]     = s.alarm;
   doc["moving"]    = movingActive;
