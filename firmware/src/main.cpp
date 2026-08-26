@@ -36,7 +36,7 @@
 #include "deviceid.h"            // deviceNameValid(), chipSeedName() — host-testable
 #include "geo.h"                 // geoDistM() — movement detection, host-testable
 
-#define FW_VERSION "2.83"
+#define FW_VERSION "2.84"
 
 #define SerialMon Serial
 #define SerialAT  Serial1
@@ -185,8 +185,11 @@ static bool otaUrlSafe(const char *u) {
   return true;
 }
 
+static volatile bool mqttInboundSeen = false;   // any downlink this session = the socket genuinely works both ways
+static bool pendingFixSent = false;             // publishPendingFix wrote a backfill frame this wake
 static void mqttCallback(char *topic, byte *payload, unsigned int len) {
   (void)topic;
+  mqttInboundSeen = true;
   JsonDocument doc;
   if (deserializeJson(doc, payload, len)) return;
   const char *u = doc["ota_url"], *v = doc["ota_ver"];
@@ -1468,6 +1471,7 @@ static bool publishPendingFix() {                 // true = nothing pending or s
   char topic[64]; snprintf(topic, sizeof(topic), "freezer/%s/telemetry", deviceId);
   String out; serializeJson(doc, out);
   bool ok = mqtt.publish(topic, out.c_str());
+  pendingFixSent = ok;
   logLine("[gps] backfill fix @%lu %s", (unsigned long)ts, ok ? "sent" : "FAILED");
   return ok;
 }
@@ -1884,6 +1888,10 @@ void setup() {
           }
           otaPending = false;
         }
+        // Two-way-verified clear: this wake's backfill went out AND the broker
+        // demonstrably talked back to us (retained cmd arrived) — only now is the
+        // pending fix safe to drop. A dead socket fails one of the two.
+        if (pendingFixSent && mqttInboundSeen) clearPendingFix();
       } else {
         // Attach + IP can succeed while the carrier drops the user plane
         // (the 2026-07-13 outage — a dead SIM). Log PDP state so a repeat is
@@ -1948,7 +1956,11 @@ void setup() {
             if (!mqtt.connect(cid, MQTT_USER, MQTT_PASS)) { delay(1500); mqtt.connect(cid, MQTT_USER, MQTT_PASS); }
           }
           if (mqtt.connected()) {
-            if (publishSample(s, now, false, wakeReason, rssiDbm)) clearPendingFix();
+            // publish() returning true proves nothing — 2.82 cleared the pending fix on
+            // it and four more fixes vanished into dead sockets (21:25/21:29Z). The
+            // pending copy survives until a LATER wake both sends it AND sees inbound
+            // MQTT traffic (the retained cmd), the only two-way liveness we have.
+            publishSample(s, now, false, wakeReason, rssiDbm);
           } else { gpsLastStatus = 4; logLine("[gps] fix deferred - mqtt down after GNSS (rc=%d), backfills next wake", mqtt.state()); }
         }
         // movement transition detected by this (or an earlier, offline) fix —
