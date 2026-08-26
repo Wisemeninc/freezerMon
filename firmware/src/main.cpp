@@ -34,7 +34,7 @@
 #include "deviceid.h"            // deviceNameValid(), chipSeedName() — host-testable
 #include "geo.h"                 // geoDistM() — movement detection, host-testable
 
-#define FW_VERSION "2.67"
+#define FW_VERSION "2.68"
 
 #define SerialMon Serial
 #define SerialAT  Serial1
@@ -1580,9 +1580,10 @@ void setup() {
       // GNSS: on a cold boot use a shorter, bounded window (AGPS makes fixes
       // fast) instead of the full 90 s, and — if a fix lands AND the session
       // survived GNSS — send a follow-up frame carrying the coords THIS wake
-      // rather than waiting for the next wake to carry lastLat/lastLon. Same
-      // ts, so InfluxDB upserts the coords onto this cycle's point. Periodic
-      // timer wakes keep the full window and the after-publish-only behaviour.
+      // Same ts, so InfluxDB upserts the coords onto this cycle's point. Periodic
+      // timer wakes keep the full 90 s window and send the same follow-up frame
+      // on a fix (2.68) — the pre-2.66 "carry lastLat/lastLon next wake" path
+      // no longer exists, coords are never replayed.
       //
       // EXCEPT on brownout recovery: forensics (fw 2.61, rst/ph telemetry)
       // proved the reboot loop lives HERE — a brownout wipes RTC, which forces
@@ -1605,10 +1606,16 @@ void setup() {
         } else {
           gotFix = maybeGps(coldBoot ? GPS_FIRST_BOOT_TIMEOUT_S : GPS_FIX_TIMEOUT_S);
         }
+        // A fix lands AFTER this wake's frame went out, and since 2.66 coords are
+        // published only when fresh THIS wake (gpsFreshThisWake) — so the
+        // follow-up frame is the ONLY way a fix reaches the DB. Gating it on
+        // coldBoot (2.66-2.67) silently dropped every timer-wake fix; it went
+        // unnoticed because the July verification unit was brownout-looping and
+        // every cycle was a cold boot. Any wake with a fix sends the follow-up.
         // `now` guard: if the clock never synced this cycle, `ts` is omitted from
         // both frames and the same-ts upsert can't happen -> skip to avoid a
-        // duplicate point (the fix still ships next wake via lastLat/lastLon).
-        if (coldBoot && gotFix && published && now && mqtt.connected())
+        // duplicate point (the fix is retried after the normal GPS cadence).
+        if (gotFix && published && now && mqtt.connected())
           publishSample(s, now, false, wakeReason, rssiDbm);
         // movement transition detected by this (or an earlier, offline) fix —
         // fast cadence + GPS-every-wake are already active via movingActive
