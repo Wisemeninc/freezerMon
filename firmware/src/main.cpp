@@ -36,7 +36,7 @@
 #include "deviceid.h"            // deviceNameValid(), chipSeedName() — host-testable
 #include "geo.h"                 // geoDistM() — movement detection, host-testable
 
-#define FW_VERSION "2.72"
+#define FW_VERSION "2.73"
 
 #define SerialMon Serial
 #define SerialAT  Serial1
@@ -229,6 +229,19 @@ char deviceId[32] = "cooler-01";   // safe placeholder until resolveDeviceId() r
 static char    logRing[LOG_RING][LOG_LINE];
 static uint8_t logHead = 0, logCount = 0;
 static portMUX_TYPE logMux = portMUX_INITIALIZER_UNLOCKED;
+// Crash forensics: the last few log lines live in RTC memory that is NOT zeroed by
+// software / watchdog / panic resets (RTC_NOINIT_ATTR), so the boot after an
+// INT_WDT / TASK_WDT / PANIC can publish what the firmware was doing when it died
+// (crash_log field). Power-on and brownout resets DO clear RTC — this is a
+// firmware-fault tool, not a supply-fault tool. Snapshotted at the top of setup()
+// before this boot's own log lines overwrite it. Two tasks write it unlocked; a
+// torn line in a diagnostic is acceptable, a spinlock in the log path is not.
+#define CRASH_LINES 4
+#define CRASH_LINE  72
+RTC_NOINIT_ATTR char     crashRing[CRASH_LINES][CRASH_LINE];
+RTC_NOINIT_ATTR uint8_t  crashHead;
+RTC_NOINIT_ATTR uint32_t crashMagic;
+static String crashSnapshot;                     // filled at boot after a WDT/PANIC reset, published once
 
 // log to serial AND the ring buffer served at /log (no trailing newline in fmt)
 static void logLine(const char *fmt, ...) {
@@ -238,6 +251,9 @@ static void logLine(const char *fmt, ...) {
   vsnprintf(buf, sizeof(buf), fmt, ap);
   va_end(ap);
   SerialMon.println(buf);
+  if (crashMagic != 0xC0DEC0DEUL) { memset(crashRing, 0, sizeof(crashRing)); crashHead = 0; crashMagic = 0xC0DEC0DEUL; }
+  strlcpy(crashRing[crashHead], buf, CRASH_LINE);
+  crashHead = (crashHead + 1) % CRASH_LINES;
   portENTER_CRITICAL(&logMux);
   memcpy(logRing[logHead], buf, LOG_LINE);            // NUL-terminated by vsnprintf
   logHead = (logHead + 1) % LOG_RING;
@@ -1539,6 +1555,11 @@ static bool publishSample(const Sample &s, uint32_t nowEpoch, bool buffered,
     doc["hdop"] = serialized(String(lastFixHdop, 1));
     doc["sats"] = lastFixSats;
   }
+  if (g_resetStr && strcmp(g_resetStr, "deepsleep") != 0) {   // reset forensics on every non-sleep boot
+    doc["rr0"] = (int)rtc_get_reset_reason(0);            // ROM-level per-core reset reasons (rom/rtc.h)
+    doc["rr1"] = (int)rtc_get_reset_reason(1);
+    if (crashSnapshot.length()) doc["crash_log"] = crashSnapshot;   // last log lines before a WDT/PANIC death
+  }
   if (gpsLastStatus) {                                   // outcome of the most recent hunt (see gpsLastStatus)
     doc["gps_last"]      = gpsLastStatus;
     doc["gps_last_s"]    = gpsLastSecs;
@@ -1631,6 +1652,18 @@ void setup() {
   awakeStart = millis();
   bootCount++;
   SerialMon.begin(115200);
+  {                      // crash forensics: snapshot the pre-reset log tail before anything logs
+    esp_reset_reason_t r0 = esp_reset_reason();
+    if ((r0 == ESP_RST_INT_WDT || r0 == ESP_RST_TASK_WDT || r0 == ESP_RST_PANIC || r0 == ESP_RST_WDT) &&
+        crashMagic == 0xC0DEC0DEUL) {
+      for (uint8_t i = 0; i < CRASH_LINES; i++) {
+        const char *l = crashRing[(crashHead + i) % CRASH_LINES];
+        if (!l[0]) continue;
+        if (crashSnapshot.length()) crashSnapshot += " | ";
+        crashSnapshot += l;
+      }
+    }
+  }
   resolveDeviceId();     // NVS -> deviceId, before the AP SSID / MQTT topics use it
   if (!modemLock) modemLock = xSemaphoreCreateRecursiveMutex();   // before the dbgweb task can exist
 
