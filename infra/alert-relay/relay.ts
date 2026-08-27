@@ -44,6 +44,7 @@ Bun.serve({
     if (url.pathname === "/test") return new Response((await send("freezerMon: test message — alerts are wired to Signal.")) ? "sent\n" : "failed (see logs)\n", { status: 200 });
     if (url.pathname === "/grafana" && req.method === "POST") {
       let body: any; try { body = await req.json(); } catch { return new Response("bad json", { status: 400 }); }
+      if (process.env.RELAY_DEBUG) console.log("grafana payload:", JSON.stringify(body).slice(0, 4000));
       const ok = await send(format(body));
       return new Response(ok ? "sent" : "signal send failed", { status: ok ? 200 : 502 });
     }

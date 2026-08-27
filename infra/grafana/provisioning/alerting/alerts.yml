@@ -28,6 +28,7 @@ groups:
                   |> filter(fn: (r) => r._measurement == "telemetry" and r._field == "t_cab")
                   |> group(columns: ["device"])
                   |> last()
+                  |> keep(columns: ["_time", "_value", "device"])   # wide numeric series: Grafana's expression engine rejects string columns ("got type long")
           - refId: B
             relativeTimeRange: { from: 0, to: 0 }
             datasourceUid: __expr__
@@ -102,6 +103,7 @@ groups:
                   |> filter(fn: (r) => r._measurement == "telemetry" and r._field == "vbat_mv")
                   |> group(columns: ["device"])
                   |> last()
+                  |> keep(columns: ["_time", "_value", "device"])
           - refId: B
             relativeTimeRange: { from: 0, to: 0 }
             datasourceUid: __expr__
