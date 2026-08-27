@@ -37,7 +37,7 @@
 #include "deviceid.h"            // deviceNameValid(), chipSeedName() — host-testable
 #include "geo.h"                 // geoDistM() — movement detection, host-testable
 
-#define FW_VERSION "2.87"   // verNewer() compares dotted INTEGER components: 2.10 > 2.9, and 2.7 < 2.68 — never drop a trailing digit
+#define FW_VERSION "2.88"   // verNewer() compares dotted INTEGER components: 2.10 > 2.9, and 2.7 < 2.68 — never drop a trailing digit
 
 #define SerialMon Serial
 #define SerialAT  Serial1
@@ -446,6 +446,20 @@ static void resolveDeviceId() {
 // ---------- helpers ----------
 static bool awakeBudgetLeft() { return (millis() - awakeStart) < MAX_AWAKE_MS; }
 
+// Supply-sag instrumentation (2.88). Every brownout dies at ph=1 — the modem power-on
+// and boot. Sampling the battery ADC at ~500 Hz through those steps on the cycles
+// that SURVIVE gives the depth and timing of the sag, hence the path resistance
+// (R ≈ (rest − min) / I_pulse): the number that decides cell vs holder vs supercap.
+RTC_DATA_ATTR uint16_t sagRestMv = 0, sagMinMv = 0, sagAtMs = 0; RTC_DATA_ATTR uint8_t sagStep = 0;
+static uint32_t sagT0 = 0; static uint8_t sagCurStep = 0;
+static void sagDelay(uint32_t ms) {               // delay() that watches the rail
+  uint32_t end = millis() + ms;
+  while ((int32_t)(end - millis()) > 0) {
+    uint16_t v = analogReadMilliVolts(BOARD_BAT_ADC_PIN) * 2;
+    if (v && (sagMinMv == 0 || v < sagMinMv)) { sagMinMv = v; sagAtMs = (uint16_t)(millis() - sagT0); sagStep = sagCurStep; }
+    delay(2);
+  }
+}
 static void modemPowerOn() {
   pinMode(BOARD_POWERON_PIN, OUTPUT);
   // TRUE supply cut before powering up — not just a reset. The A76XX GNSS
@@ -455,28 +469,33 @@ static void modemPowerOn() {
   // (external-supply) unit never does — so force it here on every power-on.
   digitalWrite(BOARD_POWERON_PIN, LOW);
   delay(1200);                                    // let the rail fully drain
+  sagRestMv = analogReadMilliVolts(BOARD_BAT_ADC_PIN) * 2;   // resting voltage, modem rail off
+  sagMinMv = 0; sagAtMs = 0; sagStep = 0; sagT0 = millis();
   // Precharge double-tap: slamming the drained rail on in one step draws an
   // inrush surge that browns out a marginal cell/holder (seen live 2026-07-15:
   // every wake's FIRST power-on died, the reboot's second attempt survived on
   // the now-precharged caps). Emulate that deliberately: a short first tap
   // charges the modem's bulk capacitance, the brief drop bounds the surge, and
   // the final enable then sees a much smaller di/dt. Costs 250 ms.
-  digitalWrite(BOARD_POWERON_PIN, HIGH);          // tap 1: precharge the bulk caps
-  delay(150);
+  sagCurStep = 1; digitalWrite(BOARD_POWERON_PIN, HIGH);   // tap 1: precharge the bulk caps
+  sagDelay(150);
   digitalWrite(BOARD_POWERON_PIN, LOW);
-  delay(100);
-  digitalWrite(BOARD_POWERON_PIN, HIGH);          // rail for modem section (caps precharged)
+  sagDelay(100);
+  sagCurStep = 2; digitalWrite(BOARD_POWERON_PIN, HIGH);   // rail for modem section (caps precharged)
   agpsLoaded = false;                             // rail was cycled -> GNSS-engine RAM (and any AGPS data in it) is gone
 
   pinMode(MODEM_RESET_PIN, OUTPUT);               // reset pulse (LilyGO reference)
-  digitalWrite(MODEM_RESET_PIN, !MODEM_RESET_LEVEL); delay(100);
-  digitalWrite(MODEM_RESET_PIN, MODEM_RESET_LEVEL);  delay(2600);
+  sagCurStep = 3;
+  digitalWrite(MODEM_RESET_PIN, !MODEM_RESET_LEVEL); sagDelay(100);
+  digitalWrite(MODEM_RESET_PIN, MODEM_RESET_LEVEL);  sagDelay(2600);
   digitalWrite(MODEM_RESET_PIN, !MODEM_RESET_LEVEL);
 
   pinMode(BOARD_PWRKEY_PIN, OUTPUT);              // PWRKEY: 1 s active pulse (100 ms is flaky on A76xx)
-  digitalWrite(BOARD_PWRKEY_PIN, LOW);  delay(100);
-  digitalWrite(BOARD_PWRKEY_PIN, HIGH); delay(1000);
+  sagCurStep = 4;
+  digitalWrite(BOARD_PWRKEY_PIN, LOW);  sagDelay(100);
+  digitalWrite(BOARD_PWRKEY_PIN, HIGH); sagDelay(1000);
   digitalWrite(BOARD_PWRKEY_PIN, LOW);
+  sagCurStep = 5; sagDelay(3000);                 // modem boot: its own DC-DC + first RF — the deepest draw before attach
 
   // 8 KB RX ring buffer (vs the 256-byte default): headroom for the modem's
   // 4 KB HTTPREAD chunk to sit while Update.write() stalls on a flash-sector
@@ -1745,6 +1764,12 @@ static bool publishSample(const Sample &s, uint32_t nowEpoch, bool buffered,
   doc["rst"]       = g_resetStr;      // reset reason (diagnosing the no-sleep loop)
   doc["ph"]        = prevPhase;       // how far the PREVIOUS cycle got (NVS breadcrumb, 5=reached sleep entry)
   doc["bo_streak"] = brownoutStreak;  // consecutive brownout boots (0 on a clean wake); >= BROWNOUT_SHED_AFTER sheds GNSS
+  if (sagRestMv) {                    // supply sag through modem power-on (this wake, survived): rest, min, when, which step
+    doc["vbat_rest_mv"] = sagRestMv;
+    doc["vbat_min_mv"]  = sagMinMv;
+    doc["vbat_sag_ms"]  = sagAtMs;
+    doc["vbat_sag_at"]  = sagStep;    // 1 tap-precharge 2 rail-on 3 reset-pulse 4 PWRKEY 5 modem-boot
+  }
   doc["fw"]        = FW_VERSION;      // fleet version tracking + OTA confirmation
 
   // 768: serializeJson TRUNCATES SILENTLY at the buffer size and returns bytes
