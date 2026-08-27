@@ -67,6 +67,7 @@ groups:
                   |> group(columns: ["device"])
                   |> last()
                   |> map(fn: (r) => ({ r with _value: float(v: int(v: now()) - int(v: r._time)) / 1000000000.0 }))
+                  |> keep(columns: ["_time", "_value", "device"])
           - refId: B
             relativeTimeRange: { from: 0, to: 0 }
             datasourceUid: __expr__
