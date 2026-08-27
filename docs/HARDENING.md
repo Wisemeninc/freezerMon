@@ -19,6 +19,22 @@ means arbitrary code execution on the device.
 | P8 | CSRF on the console: `/setname` Origin check failed open on a missing header; `/update` and `/update/check` had no check — a drive-by page on the AP could erase the inactive OTA slot and block cellular OTA for 3 min. | **✅ DONE (2.69)** — `sameOriginRequest()` fail-closed on all three, enforced in the upload callback before `Update.begin` |
 | P9 | `PublishFirmware.ts` built a remote root shell command by string concatenation from unvalidated argv (`JSON.stringify` is not shell quoting). | **✅ DONE** — argv validated against the firmware's own contracts, payload on stdin, `publisher` identity |
 
+## Round 5 — gate on the 2.87→2.96 train + Signal alerting (2026-08-27, opencode Kimi K3 ×2; GPT-5.5/5.3 runs hung)
+
+Security: **CHANGES REQUESTED** — 1 HIGH: the `signal-cli-rest-api` port (no auth, full control of the owner's
+Signal account) stayed published on the host loopback after device linking → unpublished, documented as
+link-time-only; relay had no input limits → 64 KB body cap, printable-text sanitizer, 1500-char messages,
+honest 502; the echo delivery-proof accepted any frame on the topic → matched on this frame's own `seq`
+(first key, offset 0); `/status` torn read → spinlock; images pinned; README now states that the shared
+device credential can read every unit's telemetry (coordinates) until per-device credentials (P3).
+Correctness: the reviewer's BLOCKER (liveness guard "dead code") was overstated — the guard is live for the
+early-return paths it was written for — but its `lastReportMs` now means *last successful report*; the
+same-ts follow-up / stale-`crash_log`-quote echo ambiguity and the unsynced-clock (`ts == 0`) never-clears
+case are both closed by the `seq` match; `crash_log` is budgeted against the complete frame. **Deferred:**
+a Grafana Editor could push text to the owner's phone via the contact-point test (no Editors exist; the
+operator is a Viewer); the global OTA failure counter can lock an operator out after 6 bad pulls until a
+real install (intended); `otaUrlSafe` pins host but not port/scheme (OTA is plain HTTP by design, signed).
+
 ## Round 4 — gate on the 2.69→2.86 train (2026-08-27, opencode GPT-5.5 + Kimi K3, plus a Claude-family auditor)
 
 Three reviewers that did not author the train (`cdb379f..14e528a`) confirmed all six round-3 HIGH fixes as real
