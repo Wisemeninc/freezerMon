@@ -37,7 +37,7 @@
 #include "deviceid.h"            // deviceNameValid(), chipSeedName() — host-testable
 #include "geo.h"                 // geoDistM() — movement detection, host-testable
 
-#define FW_VERSION "2.88"   // verNewer() compares dotted INTEGER components: 2.10 > 2.9, and 2.7 < 2.68 — never drop a trailing digit
+#define FW_VERSION "2.89"   // verNewer() compares dotted INTEGER components: 2.10 > 2.9, and 2.7 < 2.68 — never drop a trailing digit
 
 #define SerialMon Serial
 #define SerialAT  Serial1
@@ -450,14 +450,20 @@ static bool awakeBudgetLeft() { return (millis() - awakeStart) < MAX_AWAKE_MS; }
 // and boot. Sampling the battery ADC at ~500 Hz through those steps on the cycles
 // that SURVIVE gives the depth and timing of the sag, hence the path resistance
 // (R ≈ (rest − min) / I_pulse): the number that decides cell vs holder vs supercap.
-RTC_DATA_ATTR uint16_t sagRestMv = 0, sagMinMv = 0, sagAtMs = 0; RTC_DATA_ATTR uint8_t sagStep = 0;
+RTC_DATA_ATTR uint16_t sagRestMv = 0, sagMinMv = 0, sagAtMs = 0, sagDeepN = 0; RTC_DATA_ATTR uint8_t sagStep = 0;
 static uint32_t sagT0 = 0; static uint8_t sagCurStep = 0;
 static void sagDelay(uint32_t ms) {               // delay() that watches the rail
-  uint32_t end = millis() + ms;
+  // Inrush spikes are sub-millisecond: sample back-to-back (~10 kHz) for the first
+  // 60 ms after every edge, then every 2 ms. sagDeepN counts samples more than 300 mV
+  // below rest — spike persistence, distinguishes a needle from a sustained sag.
+  uint32_t start = millis(), end = start + ms;
   while ((int32_t)(end - millis()) > 0) {
     uint16_t v = analogReadMilliVolts(BOARD_BAT_ADC_PIN) * 2;
-    if (v && (sagMinMv == 0 || v < sagMinMv)) { sagMinMv = v; sagAtMs = (uint16_t)(millis() - sagT0); sagStep = sagCurStep; }
-    delay(2);
+    if (v) {
+      if (sagMinMv == 0 || v < sagMinMv) { sagMinMv = v; sagAtMs = (uint16_t)(millis() - sagT0); sagStep = sagCurStep; }
+      if (sagRestMv && v + 300 < sagRestMv && sagDeepN < 65535) sagDeepN++;
+    }
+    if (millis() - start > 60) delay(2); else yield();
   }
 }
 static void modemPowerOn() {
@@ -470,7 +476,7 @@ static void modemPowerOn() {
   digitalWrite(BOARD_POWERON_PIN, LOW);
   delay(1200);                                    // let the rail fully drain
   sagRestMv = analogReadMilliVolts(BOARD_BAT_ADC_PIN) * 2;   // resting voltage, modem rail off
-  sagMinMv = 0; sagAtMs = 0; sagStep = 0; sagT0 = millis();
+  sagMinMv = 0; sagAtMs = 0; sagStep = 0; sagDeepN = 0; sagT0 = millis();
   // Precharge double-tap: slamming the drained rail on in one step draws an
   // inrush surge that browns out a marginal cell/holder (seen live 2026-07-15:
   // every wake's FIRST power-on died, the reboot's second attempt survived on
@@ -1769,6 +1775,7 @@ static bool publishSample(const Sample &s, uint32_t nowEpoch, bool buffered,
     doc["vbat_min_mv"]  = sagMinMv;
     doc["vbat_sag_ms"]  = sagAtMs;
     doc["vbat_sag_at"]  = sagStep;    // 1 tap-precharge 2 rail-on 3 reset-pulse 4 PWRKEY 5 modem-boot
+    doc["vbat_sag_n"]   = sagDeepN;   // samples >300 mV below rest (needle vs sustained sag)
   }
   doc["fw"]        = FW_VERSION;      // fleet version tracking + OTA confirmation
 
