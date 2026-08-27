@@ -1,0 +1,20 @@
+# Alerts go to Signal via infra/alert-relay (Grafana webhook -> signal-cli-rest-api).
+# See README §Alerting for the one-time device linking.
+apiVersion: 1
+contactPoints:
+  - orgId: 1
+    name: signal
+    receivers:
+      - uid: fm-signal
+        type: webhook
+        settings:
+          url: http://alert-relay:8091/grafana
+          httpMethod: POST
+        disableResolveMessage: false
+policies:
+  - orgId: 1
+    receiver: signal
+    group_by: ["alertname", "device"]
+    group_wait: 30s
+    group_interval: 5m
+    repeat_interval: 4h

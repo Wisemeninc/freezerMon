@@ -127,7 +127,20 @@ cd infra && set -a && source .env && set +a && bun scripts/CreateOperator.ts
 ## Alerting
 
 Three rules are provisioned: cabinet temp above 8 °C for 10 min (cooler food-safety ceiling — set it *above* your unit's normal band and keep it in sync with `TEMP_ALARM_C` in `config.h`, or the alarm never clears and the fast reporting cadence drains the battery ~5×; a freezer would use e.g. −12), no data for 15 min (offline/out of coverage), battery under 3.4 V.
-Point them at your phone: Grafana → Alerting → Contact points → add **Telegram** (bot token + chat id) or email, then set it as the default notification policy. If your Grafana version rejects the provisioned rule schema, recreate the three rules in the UI — the Flux queries in `infra/grafana/provisioning/alerting/alerts.yml` copy-paste directly.
+**Delivery is Signal**, no phone-number registration needed: the stack ships `signal-cli-rest-api` plus a tiny relay, and Grafana's provisioned contact point posts to the relay. One-time setup:
+
+```bash
+# 1. fill SIGNAL_NUMBER (your own number) and SIGNAL_RECIPIENTS in .env, then
+docker compose up -d signal alert-relay && docker compose restart grafana
+# 2. link the container as a secondary device of YOUR Signal account (like Signal Desktop):
+#    on your PC:  ssh -L 8080:127.0.0.1:8080 <server>   then open
+#    http://localhost:8080/v1/qrcodelink?device_name=freezermon   and scan it in Signal
+#    (Settings -> Linked devices -> +). Messages then come from your own account.
+# 3. test:
+docker compose exec alert-relay wget -qO- http://localhost:8091/test
+```
+
+Every rule change (firing and resolved) arrives as one short message: `🔴 ALARM: Cabinet temperature high — cooler-01`. To notify a group instead of a person, put the group id (from `GET /v1/groups/<number>` on the API) in `SIGNAL_RECIPIENTS`. If you prefer Telegram or email, replace the contact point in `infra/grafana/provisioning/alerting/contactpoints.yml`.
 
 ## Field debugging (WiFi console)
 

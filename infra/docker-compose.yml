@@ -59,7 +59,31 @@ services:
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
       - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
 
+  # --- Alerts -> Signal ---------------------------------------------------------
+  # signal-cli-rest-api holds a Signal account (link it as a secondary device of your
+  # own account: README §Alerting). Its API has no auth, so it is only reachable from
+  # inside this compose network and, for the one-time QR link, from the host's loopback.
+  signal:
+    image: bbernhard/signal-cli-rest-api:latest
+    restart: unless-stopped
+    environment:
+      MODE: native
+    ports:
+      - "127.0.0.1:8080:8080"    # loopback only: ssh -L 8080:127.0.0.1:8080 <host> to scan the link QR
+    volumes:
+      - signal-data:/home/.local/share/signal-cli
+
+  alert-relay:                   # Grafana webhook contact point -> Signal message
+    build: ./alert-relay
+    restart: unless-stopped
+    depends_on: [signal]
+    environment:
+      SIGNAL_URL: http://signal:8080
+      SIGNAL_NUMBER: ${SIGNAL_NUMBER:?set in .env}
+      SIGNAL_RECIPIENTS: ${SIGNAL_RECIPIENTS:?set in .env}
+
 volumes:
+  signal-data:
   mosquitto-data:
   influxdb-data:
   grafana-data:
