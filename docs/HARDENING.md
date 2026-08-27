@@ -19,6 +19,21 @@ means arbitrary code execution on the device.
 | P8 | CSRF on the console: `/setname` Origin check failed open on a missing header; `/update` and `/update/check` had no check — a drive-by page on the AP could erase the inactive OTA slot and block cellular OTA for 3 min. | **✅ DONE (2.69)** — `sameOriginRequest()` fail-closed on all three, enforced in the upload callback before `Update.begin` |
 | P9 | `PublishFirmware.ts` built a remote root shell command by string concatenation from unvalidated argv (`JSON.stringify` is not shell quoting). | **✅ DONE** — argv validated against the firmware's own contracts, payload on stdin, `publisher` identity |
 
+## Round 4 — gate on the 2.69→2.86 train (2026-08-27, opencode GPT-5.5 + Kimi K3, plus a Claude-family auditor)
+
+Three reviewers that did not author the train (`cdb379f..14e528a`) confirmed all six round-3 HIGH fixes as real
+(mutex-owned UART, char log ring, fail-closed CSRF hoisted before `Update.begin`, OTA cap + failure memory, ACL
+`cmd`-write ban, hardened publish script). They found the train's own new surface wanting — all fixed in 2.87:
+the pending-fix clear depended on an optional cmd downlink (a fleet with no retained OTA republished a fix forever)
+→ now verified by the broker echoing the device's own retained frame; per-version OTA failure memory was evadable by
+cycling `ota_ver` → global consecutive counter, reset only by a real install; `crash_log` shipped raw device/cmd
+strings and could push a frame over the buffer and suppress a whole boot's telemetry → sanitized, budgeted, capped
+at the log sites; `${device}` was raw-interpolated into 19 Flux queries (a Viewer could inject Flux via the URL) →
+`${device:regex}`; `PublishFirmware.ts` sourced the server `.env` as root shell → read with `sed`; scoped InfluxDB
+tokens replaced the shared admin token. **Recorded residuals:** the shared `freezer` credential can still forge any
+unit's telemetry/alert until per-device credentials (P3); Mosquitto `pattern` rules also grant service identities
+write on `freezer/<their-username>/*`; `/gps` and `/lte` are GET endpoints with modem side effects behind the AP PSK.
+
 ## Round 3 — full-codebase `/independent-review` gate (2026-08-26)
 
 Two reviewers that did not author the code (`Cato` correctness/design, `Silas` security) audited the
