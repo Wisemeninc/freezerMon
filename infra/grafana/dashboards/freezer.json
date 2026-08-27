@@ -2,7 +2,7 @@
   "title": "FreezerMon \u2014 Mobile Cooling Units",
   "uid": "freezermon-main",
   "schemaVersion": 39,
-  "version": 12,
+  "version": 13,
   "refresh": "1m",
   "time": {
     "from": "now-24h",
@@ -347,7 +347,8 @@
             "lineWidth": 2,
             "fillOpacity": 0,
             "spanNulls": true
-          }
+          },
+          "decimals": 1
         },
         "overrides": [
           {
@@ -366,6 +367,10 @@
               {
                 "id": "displayName",
                 "value": "Cabinet"
+              },
+              {
+                "id": "decimals",
+                "value": 1
               }
             ]
           },
@@ -385,6 +390,10 @@
               {
                 "id": "displayName",
                 "value": "Ambient"
+              },
+              {
+                "id": "decimals",
+                "value": 1
               }
             ]
           }
@@ -775,6 +784,10 @@
               {
                 "id": "displayName",
                 "value": "Cabinet"
+              },
+              {
+                "id": "decimals",
+                "value": 1
               }
             ]
           },
@@ -791,6 +804,10 @@
               {
                 "id": "displayName",
                 "value": "Ambient"
+              },
+              {
+                "id": "decimals",
+                "value": 1
               }
             ]
           },
