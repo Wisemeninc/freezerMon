@@ -1,6 +1,5 @@
 # freezerMon provisioned alert rules (Grafana unified alerting, apiVersion 1).
-# Contact points (Telegram/email) are configured in the UI or a separate
-# contactPoints block — see README §Alerting.
+# Contact point + policy: contactpoints.yml (Signal via infra/alert-relay).
 apiVersion: 1
 
 groups:
@@ -13,22 +12,22 @@ groups:
         title: Cabinet temperature high
         condition: C
         for: 10m
-        noDataState: NoData
-        execErrState: Error
+        noDataState: OK          # silence is the offline rule's job — NoData here only produced spurious alarm/resolved pairs
+        execErrState: OK
         annotations:
-          summary: "Cabinet above alarm threshold on {{ $labels.device }}"
+          summary: 'Cabinet {{ printf "%.1f" $values.B.Value }} °C — limit 8 °C ({{ $labels.device }})'
         data:
           - refId: A
-            relativeTimeRange: { from: 900, to: 0 }
+            relativeTimeRange: { from: 1800, to: 0 }
             datasourceUid: influxdb
             model:
               refId: A
               query: |
                 from(bucket: "telemetry")
-                  |> range(start: -15m)
+                  |> range(start: -30m)
                   |> filter(fn: (r) => r._measurement == "telemetry" and r._field == "t_cab")
-                  |> aggregateWindow(every: 1m, fn: mean, createEmpty: false)
                   |> group(columns: ["device"])
+                  |> last()
           - refId: B
             relativeTimeRange: { from: 0, to: 0 }
             datasourceUid: __expr__
@@ -46,11 +45,11 @@ groups:
       - uid: fm-device-stale
         title: Device offline / no data
         condition: C
-        for: 15m
+        for: 5m                  # threshold is already 15 min of silence; 5 more minutes of confirmation, not 15
         noDataState: Alerting
         execErrState: Error
         annotations:
-          summary: "No telemetry received — unit offline or out of coverage"
+          summary: 'Last report {{ printf "%.0f" $values.B.Value }} s ago — unit offline, out of coverage, or out of battery ({{ $labels.device }})'
         data:
           # per-device staleness: seconds since each unit's last report.
           # A device that vanishes still has a row (from the 30-day lookback), so
@@ -86,21 +85,22 @@ groups:
         title: Battery low
         condition: C
         for: 5m
-        noDataState: NoData
-        execErrState: Error
+        noDataState: OK
+        execErrState: OK
         annotations:
-          summary: "Battery below 3.4 V on {{ $labels.device }}"
+          summary: 'Battery {{ printf "%.0f" $values.B.Value }} mV — below 3400 mV, recharge or connect power ({{ $labels.device }})'
         data:
           - refId: A
-            relativeTimeRange: { from: 900, to: 0 }
+            relativeTimeRange: { from: 1800, to: 0 }
             datasourceUid: influxdb
             model:
               refId: A
               query: |
                 from(bucket: "telemetry")
-                  |> range(start: -15m)
+                  |> range(start: -30m)
                   |> filter(fn: (r) => r._measurement == "telemetry" and r._field == "vbat_mv")
                   |> group(columns: ["device"])
+                  |> last()
           - refId: B
             relativeTimeRange: { from: 0, to: 0 }
             datasourceUid: __expr__
