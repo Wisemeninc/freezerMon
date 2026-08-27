@@ -14,7 +14,7 @@
     "to": "now"
   },
   "schemaVersion": 39,
-  "version": 3,
+  "version": 5,
   "templating": {
     "list": [
       {
@@ -729,13 +729,10 @@
       },
       "options": {
         "view": {
-          "id": "fit",
-          "allLayers": true,
-          "lastOnly": false,
-          "padding": 12,
-          "zoom": 16,
-          "lat": 55.99,
-          "lon": 9.958
+          "id": "coords",
+          "lat": 55.9912,
+          "lon": 9.9579,
+          "zoom": 14
         },
         "basemap": {
           "type": "osm-standard",
