@@ -17,4 +17,12 @@ policies:
     group_by: ["alertname", "device"]
     group_wait: 30s
     group_interval: 5m
-    repeat_interval: 4h
+    repeat_interval: 4h            # temperature / battery: nag every 4 h while still bad
+    routes:
+      - receiver: signal           # offline: say it once, then only "OK again" when it returns
+        object_matchers:
+          - ["alertname", "=", "Device offline / no data"]
+        group_by: ["alertname", "device"]
+        group_wait: 30s
+        group_interval: 5m
+        repeat_interval: 8760h     # Grafana needs a duration; a year = effectively once
