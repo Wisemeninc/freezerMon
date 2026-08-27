@@ -2,7 +2,7 @@
   "title": "FreezerMon \u2014 Mobile Cooling Units",
   "uid": "freezermon-main",
   "schemaVersion": 39,
-  "version": 8,
+  "version": 9,
   "refresh": "1m",
   "time": {
     "from": "now-24h",
@@ -1210,7 +1210,7 @@
           "calcs": [
             "lastNotNull"
           ],
-          "fields": "/^_value$/",
+          "fields": "/.*/",
           "values": false
         }
       },
@@ -1221,7 +1221,7 @@
             "uid": "influxdb"
           },
           "refId": "A",
-          "query": "from(bucket: \"telemetry\")\n |> range(start: -30d)\n |> filter(fn: (r) => r._measurement == \"telemetry\" and r.device =~ /^${device:regex}$/ and r._field == \"wake\")\n |> last()\n |> keep(columns: [\"_time\", \"_value\"])"
+          "query": "from(bucket: \"telemetry\")\n |> range(start: -30d)\n |> filter(fn: (r) => r._measurement == \"telemetry\" and r.device =~ /^${device:regex}$/ and r._field == \"wake\")\n |> last()\n |> keep(columns: [\"_value\"])"
         }
       ]
     },
@@ -1304,7 +1304,7 @@
           "calcs": [
             "lastNotNull"
           ],
-          "fields": "/^_value$/",
+          "fields": "/.*/",
           "values": false
         }
       },
@@ -1315,7 +1315,7 @@
             "uid": "influxdb"
           },
           "refId": "A",
-          "query": "from(bucket: \"telemetry\")\n |> range(start: -30d)\n |> filter(fn: (r) => r._measurement == \"telemetry\" and r.device =~ /^${device:regex}$/ and r._field == \"rst\")\n |> last()\n |> keep(columns: [\"_time\", \"_value\"])"
+          "query": "from(bucket: \"telemetry\")\n |> range(start: -30d)\n |> filter(fn: (r) => r._measurement == \"telemetry\" and r.device =~ /^${device:regex}$/ and r._field == \"rst\")\n |> last()\n |> keep(columns: [\"_value\"])"
         }
       ]
     },
@@ -1362,7 +1362,7 @@
           "calcs": [
             "lastNotNull"
           ],
-          "fields": "/^_value$/",
+          "fields": "/.*/",
           "values": false
         }
       },
@@ -1373,7 +1373,7 @@
             "uid": "influxdb"
           },
           "refId": "A",
-          "query": "from(bucket: \"telemetry\")\n |> range(start: -30d)\n |> filter(fn: (r) => r._measurement == \"telemetry\" and r.device =~ /^${device:regex}$/ and r._field == \"fw\")\n |> last()\n |> keep(columns: [\"_time\", \"_value\"])"
+          "query": "from(bucket: \"telemetry\")\n |> range(start: -30d)\n |> filter(fn: (r) => r._measurement == \"telemetry\" and r.device =~ /^${device:regex}$/ and r._field == \"fw\")\n |> last()\n |> keep(columns: [\"_value\"])"
         }
       ]
     },
