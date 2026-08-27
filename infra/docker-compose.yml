@@ -64,12 +64,14 @@ services:
   # own account: README §Alerting). Its API has no auth, so it is only reachable from
   # inside this compose network and, for the one-time QR link, from the host's loopback.
   signal:
-    image: bbernhard/signal-cli-rest-api:latest
+    image: bbernhard/signal-cli-rest-api:0.100   # pinned: this container holds your Signal session
     restart: unless-stopped
     environment:
       MODE: native
-    ports:
-      - "127.0.0.1:8080:8080"    # loopback only: ssh -L 8080:127.0.0.1:8080 <host> to scan the link QR
+    # The REST API has NO auth and can send/read Signal as your account. Publish it on the
+    # host loopback ONLY while linking the device (scan the QR), then comment it out again:
+    # ports:
+    #   - "127.0.0.1:8080:8080"    # ssh -L 8080:127.0.0.1:8080 <host>, open /v1/qrcodelink?device_name=freezermon
     volumes:
       - signal-data:/home/.local/share/signal-cli
 

@@ -37,7 +37,7 @@
 #include "deviceid.h"            // deviceNameValid(), chipSeedName() — host-testable
 #include "geo.h"                 // geoDistM() — movement detection, host-testable
 
-#define FW_VERSION "2.95"   // verNewer() compares dotted INTEGER components: 2.10 > 2.9, and 2.7 < 2.68 — never drop a trailing digit
+#define FW_VERSION "2.96"   // verNewer() compares dotted INTEGER components: 2.10 > 2.9, and 2.7 < 2.68 — never drop a trailing digit
 
 #define SerialMon Serial
 #define SerialAT  Serial1
@@ -134,6 +134,7 @@ RTC_DATA_ATTR uint8_t  stillStreak = 0;         // consecutive near-still fixes 
 RTC_DATA_ATTR uint8_t  moveAlertPending = 0;    // `moving` alert queued until MQTT is next up
 RTC_DATA_ATTR uint8_t  tempAlertPending = 0;    // `temp_breach` alert queued — the latch can happen on a boot that dies before MQTT (double-boot pattern), so the edge is decoupled from the publish
 static Sample lastSample; static bool lastSampleValid = false;   // main thread's most recent reading, for /status
+static portMUX_TYPE sampleMux = portMUX_INITIALIZER_UNLOCKED;     // /status copies it on the console task
 RTC_DATA_ATTR uint8_t  coldChargeActive = 0;    // cold-charge condition latched (one-shot alert + re-arm hysteresis)
 
 uint32_t awakeStart = 0;
@@ -208,17 +209,27 @@ static bool verStrictOk(const char *v) {           // ^[0-9]{1,3}\.[0-9]{1,3}$
   }
   return dots == 1 && a > 0 && b > 0;
 }
-static volatile bool mqttInboundSeen = false;   // any downlink this session
-static volatile bool mqttEchoSeen = false;      // the broker returned OUR retained telemetry frame: proof the publish path delivered
+static volatile bool mqttEchoSeen = false;      // the broker returned OUR OWN last frame: proof the publish path delivered
+static volatile uint32_t lastPubTs = 0;         // ts of the frame we last published; the echo must carry exactly this
 static bool pendingFixSent = false;             // publishPendingFix wrote a backfill frame this wake
 static void mqttCallback(char *topic, byte *payload, unsigned int len) {
-  mqttInboundSeen = true;
   // Our own live telemetry frame is published retained; subscribing to that topic makes
   // the broker hand it straight back. Receiving it proves the broker STORED what this
   // session published — the only delivery evidence QoS-0 PubSubClient can give us
-  // (publish() returns true into dead sockets). A cmd downlink is optional and may not
-  // exist (review 2026-08-27), so it is no longer the liveness signal.
-  if (strstr(topic, "/telemetry")) { mqttEchoSeen = true; return; }
+  // (publish() returns true into dead sockets). The echo must be OUR frame: another
+  // holder of the shared credential (or a stale retained frame) on the same topic must
+  // not count as delivery proof (review 2026-08-27) — match on this cycle's ts.
+  if (strstr(topic, "/telemetry")) {
+    if (lastPubTs) {
+      char key[24]; int n = snprintf(key, sizeof(key), "\"ts\":%lu", (unsigned long)lastPubTs);
+      if (n > 0 && len > (unsigned)n) {
+        for (unsigned i = 0; i + n <= len; i++) {
+          if (memcmp(payload + i, key, n) == 0 && (i + n == len || payload[i + n] == ',' || payload[i + n] == '}')) { mqttEchoSeen = true; break; }
+        }
+      }
+    }
+    return;
+  }
   JsonDocument doc;
   if (deserializeJson(doc, payload, len)) return;
   const char *u = doc["ota_url"], *v = doc["ota_ver"];
@@ -669,7 +680,8 @@ static void startDebugAp() {
     // bus and re-drives DOOR_PIN, and doing that from the console task while the main
     // thread samples corrupts DS18B20 conversions (NAN -> resets the breach streak).
     Sample s;
-    if (lastSampleValid) s = lastSample; else readSensors(s);
+    bool have; portENTER_CRITICAL(&sampleMux); have = lastSampleValid; if (have) s = lastSample; portEXIT_CRITICAL(&sampleMux);
+    if (!have) readSensors(s);
     JsonDocument doc;
     doc["device"]    = deviceId;
     doc["fw"]        = FW_VERSION;
@@ -1785,6 +1797,7 @@ static bool publishSample(const Sample &s, uint32_t nowEpoch, bool buffered,
   // parse ... bo_streak:"), which is where ALL of tonight's "lost fixes" actually
   // died. The dead-socket theories (2.78/2.82/2.84) were chasing this. The guard
   // below makes the failure loud if the frame ever outgrows the buffer again.
+  if (!buffered && ts) lastPubTs = ts;          // the echo check matches this exact ts
   char topic[64], payload[PAYLOAD_MAX];         // largest frame (all breadcrumbs + budgeted crash_log) is ~820 B; keep headroom
   snprintf(topic, sizeof(topic), "freezer/%s/telemetry", deviceId);
   size_t n = serializeJson(doc, payload, sizeof(payload));
@@ -1949,7 +1962,7 @@ void setup() {
   Sample s;
   readSensors(s);
   evaluateAlarm(s);
-  lastSample = s; lastSampleValid = true;               // /status reads this copy
+  portENTER_CRITICAL(&sampleMux); lastSample = s; lastSampleValid = true; portEXIT_CRITICAL(&sampleMux);   // /status reads this copy
 
   bool published = false;
   if (awakeBudgetLeft()) {
@@ -2240,7 +2253,7 @@ void loop() {
   Sample s;
   readSensors(s);
   evaluateAlarm(s);
-  lastSample = s; lastSampleValid = true;               // /status reads this copy
+  portENTER_CRITICAL(&sampleMux); lastSample = s; lastSampleValid = true; portEXIT_CRITICAL(&sampleMux);   // /status reads this copy
   gpsFreshThisWake = false;                             // powered loop never reboots — freshness is per report cycle
   // Echo accounting (2.95): the broker's copy of our retained frame arrives over LTE
   // through the modem's polled receive path and often lands well after a 3 s wait —

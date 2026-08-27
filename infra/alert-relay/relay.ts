@@ -15,6 +15,9 @@ const RECIPIENTS = (process.env.SIGNAL_RECIPIENTS ?? "").split(",").map((s) => s
 
 async function send(message: string): Promise<boolean> {
   if (!NUMBER || RECIPIENTS.length === 0) { console.error("SIGNAL_NUMBER / SIGNAL_RECIPIENTS not set"); return false; }
+  // Whatever posted this (Grafana, or anything else on the compose network) does not get
+  // to push control characters or a novel to a phone: printable text, capped length.
+  message = message.replace(/[^\P{C}\n]/gu, "").slice(0, 1500);
   const r = await fetch(`${SIGNAL_URL}/v2/send`, {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ message, number: NUMBER, recipients: RECIPIENTS }),
@@ -41,10 +44,12 @@ Bun.serve({
   async fetch(req) {
     const url = new URL(req.url);
     if (url.pathname === "/health") return new Response("ok");
-    if (url.pathname === "/test") return new Response((await send("freezerMon: test message — alerts are wired to Signal.")) ? "sent\n" : "failed (see logs)\n", { status: 200 });
+    if (url.pathname === "/test") { const ok = await send("freezerMon: test message — alerts are wired to Signal."); return new Response(ok ? "sent\n" : "failed (see logs)\n", { status: ok ? 200 : 502 }); }
     if (url.pathname === "/grafana" && req.method === "POST") {
-      let body: any; try { body = await req.json(); } catch { return new Response("bad json", { status: 400 }); }
-      if (process.env.RELAY_DEBUG) console.log("grafana payload:", JSON.stringify(body).slice(0, 4000));
+      const len = Number(req.headers.get("content-length") ?? "0");
+      if (len > 65536) return new Response("too large", { status: 413 });
+      let body: any; try { body = JSON.parse((await req.text()).slice(0, 65536)); } catch { return new Response("bad json", { status: 400 }); }
+      if (process.env.RELAY_DEBUG) console.log("grafana payload:", JSON.stringify(body).slice(0, 2000));
       const ok = await send(format(body));
       return new Response(ok ? "sent" : "signal send failed", { status: ok ? 200 : 502 });
     }
