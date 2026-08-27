@@ -37,7 +37,7 @@
 #include "deviceid.h"            // deviceNameValid(), chipSeedName() — host-testable
 #include "geo.h"                 // geoDistM() — movement detection, host-testable
 
-#define FW_VERSION "2.94"   // verNewer() compares dotted INTEGER components: 2.10 > 2.9, and 2.7 < 2.68 — never drop a trailing digit
+#define FW_VERSION "2.95"   // verNewer() compares dotted INTEGER components: 2.10 > 2.9, and 2.7 < 2.68 — never drop a trailing digit
 
 #define SerialMon Serial
 #define SerialAT  Serial1
@@ -2242,6 +2242,13 @@ void loop() {
   evaluateAlarm(s);
   lastSample = s; lastSampleValid = true;               // /status reads this copy
   gpsFreshThisWake = false;                             // powered loop never reboots — freshness is per report cycle
+  // Echo accounting (2.95): the broker's copy of our retained frame arrives over LTE
+  // through the modem's polled receive path and often lands well after a 3 s wait —
+  // 2.93 judged it inside that window, never saw it, and escalated to a sleep cycle
+  // every third report (13:06/13:15/13:23/13:32/13:40Z on 2026-08-27). Judge the
+  // PREVIOUS cycle's echo here, with the whole interval to arrive, then reset.
+  bool prevEcho = mqttEchoSeen;
+  if (prevEcho) { clearPendingFix(); noEchoCycles = 0; }
   mqttEchoSeen = false; pendingFixSent = false;
   // GNSS-wedge recovery (powered regime only — battery self-heals via the
   // deep-sleep rail drop). A continuously-powered modem never loses the rail,
@@ -2288,14 +2295,14 @@ void loop() {
             publishSample(s, now, false, doorChanged ? "door" : "powered", rssiDbm);
   if (!ok && poweredReconnect())                        // one retry on a fresh session before giving up the regime
     ok = publishSample(s, now, false, doorChanged ? "door" : "powered", rssiDbm);
-  if (ok) {                                             // delivery proof: our retained frame comes back on the echo subscription
+  if (ok) {                                             // give a fast echo a chance now; the real verdict is next cycle
     uint32_t tEcho = millis();
     while (millis() - tEcho < 3000UL && !mqttEchoSeen) { mqtt.loop(); delay(20); }
-    if (mqttEchoSeen) { clearPendingFix(); noEchoCycles = 0; }   // the fix in that frame is in the broker — nothing to backfill
-    else {
-      // "Connected" but nothing comes back: publish() returned true into a socket the
-      // broker is not servicing (the 2026-08-26 truncation/dead-CCH pattern). Escalate:
-      // fresh session after 2 silent cycles, full sleep/power cycle after 3.
+    if (mqttEchoSeen) { clearPendingFix(); noEchoCycles = 0; }
+    else if (!prevEcho) {
+      // Neither this cycle (so far) nor the whole previous interval brought an echo:
+      // "connected" but the broker is not servicing the socket. Escalate — fresh
+      // session after 2 silent cycles, full sleep/power cycle after 3.
       if (noEchoCycles < 255) noEchoCycles++;
       logLine("[mqtt] no echo of the powered frame (%u in a row) - fix kept for backfill", noEchoCycles);
       if (noEchoCycles >= 3) { bufferSample(s); goToSleep(REPORT_INTERVAL_FAST_S); }
