@@ -37,7 +37,7 @@
 #include "deviceid.h"            // deviceNameValid(), chipSeedName() — host-testable
 #include "geo.h"                 // geoDistM() — movement detection, host-testable
 
-#define FW_VERSION "2.90"   // verNewer() compares dotted INTEGER components: 2.10 > 2.9, and 2.7 < 2.68 — never drop a trailing digit
+#define FW_VERSION "2.91"   // verNewer() compares dotted INTEGER components: 2.10 > 2.9, and 2.7 < 2.68 — never drop a trailing digit
 
 #define SerialMon Serial
 #define SerialAT  Serial1
@@ -1942,8 +1942,9 @@ void setup() {
   // loop (seen live 2026-07-14: boot:1/power_on every cycle for an hour).
   // Shedding the AP makes the recovery cycle lighter so the loop can break;
   // a healthy cold boot (power-on/reset button) still gets the console.
-  if (coldBoot && rr != ESP_RST_BROWNOUT) startDebugAp();
-  else if (coldBoot) logLine("[boot] debug AP skipped - brownout recovery cycle");
+  bool crashReset = rr == ESP_RST_INT_WDT || rr == ESP_RST_TASK_WDT || rr == ESP_RST_PANIC;
+  if (coldBoot && rr != ESP_RST_BROWNOUT && !crashReset) startDebugAp();
+  else if (coldBoot) logLine("[boot] debug AP skipped - %s recovery cycle", crashReset ? "crash" : "brownout");
 
   Sample s;
   readSensors(s);
@@ -2124,10 +2125,12 @@ void setup() {
   if (s.extPower && published && mqtt.connected()) {
     poweredSession = true;
     mainTakeModem();                                    // loop() owns the UART for the rest of this boot
+    lastReportMs = millis();                            // liveness baseline for loop()
     lastDoor = s.doorOpen;
     prevAlarm = s.alarm;
     lastReportMs = millis();
-    if (!debugApActive) startDebugAp();                 // console always on while powered
+    if (!debugApActive && rr != ESP_RST_INT_WDT && rr != ESP_RST_TASK_WDT && rr != ESP_RST_PANIC)
+      startDebugAp();                                   // console always on while powered — except right after a crash (loop breaker)
     logLine("[power] external power present - staying awake");
     return;                                             // continues in loop()
   }
@@ -2163,12 +2166,29 @@ void setup() {
 }
 
 // Runs only in powered mode; battery cycles never reach it (deep sleep ends them).
+static uint32_t updateRunningSinceMs = 0;
 void loop() {
   if (!poweredSession) goToSleep(REPORT_INTERVAL_S);    // safety net
 
   esp_task_wdt_reset();
   mqtt.loop();
-  if (Update.isRunning()) { delay(5); return; }         // OTA in progress — don't report or sleep
+  if (Update.isRunning()) {                             // OTA in progress — don't report or sleep
+    // ... but never forever: a /update upload whose client vanished leaves Update
+    // "running" with no completion handler, and this early return then starves
+    // reporting indefinitely while feeding the watchdog (2026-08-27 10:05Z: first
+    // powered session, silent for an hour). Abort after 5 min without completion.
+    if (!updateRunningSinceMs) updateRunningSinceMs = millis();
+    if (millis() - updateRunningSinceMs > 300000UL) {
+      logLine("[ota] Update stuck running 5 min - aborting");
+      Update.abort(); otaUploadActive = false; upBinDone = false; upSigLen = 0; upFwBlocked = false; updateRunningSinceMs = 0;
+    } else { delay(5); return; }
+  } else updateRunningSinceMs = 0;
+  // Powered-regime liveness: if nothing has been published for 3 intervals, whatever
+  // the cause, drop to a fresh cycle instead of idling on mains with no telemetry.
+  if (millis() - lastReportMs > 3UL * REPORT_INTERVAL_POWERED_S * 1000UL + 60000UL) {
+    logLine("[power] no report for %lus - forcing a fresh cycle", (millis() - lastReportMs) / 1000UL);
+    goToSleep(REPORT_INTERVAL_FAST_S);
+  }
 #ifdef OTA_MANIFEST_URL
   if (otaCheckRequested) {
     checkOnlineUpdate();                                // own client on mux 1 — the MQTT session normally survives
