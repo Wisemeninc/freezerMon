@@ -37,7 +37,7 @@
 #include "deviceid.h"            // deviceNameValid(), chipSeedName() — host-testable
 #include "geo.h"                 // geoDistM() — movement detection, host-testable
 
-#define FW_VERSION "2.89"   // verNewer() compares dotted INTEGER components: 2.10 > 2.9, and 2.7 < 2.68 — never drop a trailing digit
+#define FW_VERSION "2.90"   // verNewer() compares dotted INTEGER components: 2.10 > 2.9, and 2.7 < 2.68 — never drop a trailing digit
 
 #define SerialMon Serial
 #define SerialAT  Serial1
@@ -2179,6 +2179,8 @@ void loop() {
         char cmdTopic[64];
         snprintf(cmdTopic, sizeof(cmdTopic), "freezer/%s/cmd", deviceId);
         mqtt.subscribe(cmdTopic);
+        snprintf(cmdTopic, sizeof(cmdTopic), "freezer/%s/telemetry", deviceId);
+        mqtt.subscribe(cmdTopic);                       // echo subscription (delivery proof)
       } else {
         goToSleep(REPORT_INTERVAL_FAST_S);              // recover via a fresh cycle
       }
@@ -2206,6 +2208,12 @@ void loop() {
   evaluateAlarm(s);
   lastSample = s; lastSampleValid = true;               // /status reads this copy
   gpsFreshThisWake = false;                             // powered loop never reboots — freshness is per report cycle
+  // Powered-regime parity (2.90): sync the clock BEFORE the hunt so a fix persisted by
+  // maybeGps carries this cycle's epoch (rtcEpoch is never aged in loop(), so it was
+  // the last sync time — a stale timestamp on any backfill). The fix then rides this
+  // cycle's frame; the broker echo below proves delivery and clears the NVS copy.
+  { uint32_t e = networkEpoch(); if (e) rtcEpoch = e; }
+  mqttEchoSeen = false; pendingFixSent = false;
   maybeGps(GPS_FIX_TIMEOUT_S);
   if (moveAlertPending && mqtt.connected()) {           // movement detected by that fix
     publishAlert(s, rtcEpoch, "moving");
@@ -2229,6 +2237,8 @@ void loop() {
       char cmdTopic[64];
       snprintf(cmdTopic, sizeof(cmdTopic), "freezer/%s/cmd", deviceId);
       mqtt.subscribe(cmdTopic);
+      snprintf(cmdTopic, sizeof(cmdTopic), "freezer/%s/telemetry", deviceId);
+      mqtt.subscribe(cmdTopic);                         // echo subscription (delivery proof)
     } else {
       goToSleep(REPORT_INTERVAL_FAST_S);
     }
@@ -2242,6 +2252,12 @@ void loop() {
 
   bool ok = mqtt.connected() &&
             publishSample(s, now, false, doorChanged ? "door" : "powered", rssiDbm);
+  if (ok) {                                             // delivery proof: our retained frame comes back on the echo subscription
+    uint32_t tEcho = millis();
+    while (millis() - tEcho < 3000UL && !mqttEchoSeen) { mqtt.loop(); delay(20); }
+    if (mqttEchoSeen) clearPendingFix();                // the fix in that frame is in the broker — nothing to backfill
+    else logLine("[mqtt] no echo of the powered frame - fix kept for backfill");
+  }
   if (doorChanged && s.doorOpen) publishAlert(s, now, "door_open");
   if (tempAlertPending) { publishAlert(s, now, "temp_breach"); tempAlertPending = 0; saveMonState(); }
   if (coldChargeCheck(s))        publishAlert(s, now, "cold_charge");
