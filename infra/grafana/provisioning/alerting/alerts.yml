@@ -12,22 +12,27 @@ groups:
         title: Cabinet temperature high
         condition: C
         for: 10m
-        noDataState: OK          # silence is the offline rule's job — NoData here only produced spurious alarm/resolved pairs
+        noDataState: OK          # only a device with no reading in 30 days — silence is the offline rule's job
         execErrState: OK
         annotations:
-          summary: 'Cabinet {{ printf "%.1f" $values.B.Value }} °C — limit 8 °C ({{ $labels.device }})'
+          summary: 'Cabinet {{ printf "%.1f" $values.B.Value }} °C — limit 8 °C ({{ $labels.device }}){{ with $values.E }}{{ if gt .Value 900.0 }} · last reading {{ humanizeDuration .Value }} ago, unit silent{{ end }}{{ end }}'
         data:
+          # The rule judges the LAST KNOWN reading (30-day lookback, like the offline rule), not
+          # "a reading in the last 30 min": a unit that goes silent while hot must stay in alarm
+          # until a fresh reading is below the limit. With a 30 min window the query went empty
+          # 30 min after the last frame, NoData -> Normal, and Signal got a bogus "OK again"
+          # carrying the last hot value. D/E = age of that reading, shown when it is stale.
           # keep() trims the frame to a wide numeric series (_time,_value + the device label);
           # Grafana's expression engine rejects Flux tables with string columns ("got type long").
           # NB: never put a # comment INSIDE the query block — it becomes part of the Flux text.
           - refId: A
-            relativeTimeRange: { from: 1800, to: 0 }
+            relativeTimeRange: { from: 2592000, to: 0 }
             datasourceUid: influxdb
             model:
               refId: A
               query: |
                 from(bucket: "telemetry")
-                  |> range(start: -30m)
+                  |> range(start: -30d)
                   |> filter(fn: (r) => r._measurement == "telemetry" and r._field == "t_cab")
                   |> group(columns: ["device"])
                   |> last()
@@ -45,6 +50,23 @@ groups:
               expression: B
               conditions:
                 - evaluator: { type: gt, params: [8] }   # cooler food-safety ceiling — keep in sync with TEMP_ALARM_C in firmware config.h
+          - refId: D
+            relativeTimeRange: { from: 2592000, to: 0 }
+            datasourceUid: influxdb
+            model:
+              refId: D
+              query: |
+                from(bucket: "telemetry")
+                  |> range(start: -30d)
+                  |> filter(fn: (r) => r._measurement == "telemetry" and r._field == "t_cab")
+                  |> group(columns: ["device"])
+                  |> last()
+                  |> map(fn: (r) => ({ r with _value: float(v: int(v: now()) - int(v: r._time)) / 1000000000.0 }))
+                  |> keep(columns: ["_time", "_value", "device"])
+          - refId: E
+            relativeTimeRange: { from: 0, to: 0 }
+            datasourceUid: __expr__
+            model: { refId: E, type: reduce, expression: D, reducer: last }
 
       - uid: fm-device-stale
         title: Device offline / no data
@@ -90,25 +112,30 @@ groups:
         title: Cabinet probe missing
         condition: C
         for: 5m
-        noDataState: OK          # no frames at all is the offline rule's job
+        noDataState: OK          # no frames in 30 days — nothing to judge
         execErrState: OK
         annotations:
-          summary: 'No cabinet temperature for 15 min while the unit keeps reporting — probe unplugged or failed ({{ $labels.device }})'
+          summary: 'The unit''s last reports carried no cabinet temperature for 15+ min — probe unplugged or failed ({{ $labels.device }})'
         data:
-          # 1 when frames arrived in the last 15 min but none carried t_cab; wide series (_time,_value,device)
+          # 1 when the unit's newest frame is more than 15 min newer than its newest t_cab
+          # (or it never sent one). Compares last-seen timestamps instead of counting frames in
+          # a window, so the verdict stands while the unit is silent — a probe alarm is only
+          # cleared by a frame that carries t_cab again, never by the unit going offline.
+          # Wide series (_time,_value,device); fw is present in every frame.
           - refId: A
-            relativeTimeRange: { from: 900, to: 0 }
+            relativeTimeRange: { from: 2592000, to: 0 }
             datasourceUid: influxdb
             model:
               refId: A
               query: |
                 from(bucket: "telemetry")
-                  |> range(start: -15m)
+                  |> range(start: -30d)
                   |> filter(fn: (r) => r._measurement == "telemetry" and (r._field == "fw" or r._field == "t_cab"))
                   |> group(columns: ["device", "_field"])
-                  |> count()
+                  |> last()
+                  |> map(fn: (r) => ({ device: r.device, _field: r._field, _value: float(v: int(v: r._time)) / 1000000000.0 }))
                   |> pivot(rowKey: ["device"], columnKey: ["_field"], valueColumn: "_value")
-                  |> map(fn: (r) => ({ device: r.device, _time: now(), _value: if exists r.t_cab then 0.0 else (if exists r.fw then 1.0 else 0.0) }))
+                  |> map(fn: (r) => ({ device: r.device, _time: now(), _value: if not exists r.fw then 0.0 else (if not exists r.t_cab then 1.0 else (if r.fw - r.t_cab > 900.0 then 1.0 else 0.0)) }))
                   |> group(columns: ["device"])
           - refId: B
             relativeTimeRange: { from: 0, to: 0 }
@@ -127,19 +154,21 @@ groups:
         title: Battery low
         condition: C
         for: 5m
-        noDataState: OK
+        noDataState: OK          # only a device with no reading in 30 days — silence is the offline rule's job
         execErrState: OK
         annotations:
-          summary: 'Battery {{ printf "%.0f" $values.B.Value }} mV — below 3400 mV, recharge or connect power ({{ $labels.device }})'
+          summary: 'Battery {{ printf "%.0f" $values.B.Value }} mV — below 3400 mV, recharge or connect power ({{ $labels.device }}){{ with $values.E }}{{ if gt .Value 900.0 }} · last reading {{ humanizeDuration .Value }} ago, unit silent{{ end }}{{ end }}'
         data:
+          # Last known battery voltage (30-day lookback) — a unit that dies of a flat cell must
+          # not get an "OK again" when its frames stop. D/E = age of the reading (see temp rule).
           - refId: A
-            relativeTimeRange: { from: 1800, to: 0 }
+            relativeTimeRange: { from: 2592000, to: 0 }
             datasourceUid: influxdb
             model:
               refId: A
               query: |
                 from(bucket: "telemetry")
-                  |> range(start: -30m)
+                  |> range(start: -30d)
                   |> filter(fn: (r) => r._measurement == "telemetry" and r._field == "vbat_mv")
                   |> group(columns: ["device"])
                   |> last()
@@ -157,3 +186,20 @@ groups:
               expression: B
               conditions:
                 - evaluator: { type: lt, params: [3400] }
+          - refId: D
+            relativeTimeRange: { from: 2592000, to: 0 }
+            datasourceUid: influxdb
+            model:
+              refId: D
+              query: |
+                from(bucket: "telemetry")
+                  |> range(start: -30d)
+                  |> filter(fn: (r) => r._measurement == "telemetry" and r._field == "vbat_mv")
+                  |> group(columns: ["device"])
+                  |> last()
+                  |> map(fn: (r) => ({ r with _value: float(v: int(v: now()) - int(v: r._time)) / 1000000000.0 }))
+                  |> keep(columns: ["_time", "_value", "device"])
+          - refId: E
+            relativeTimeRange: { from: 0, to: 0 }
+            datasourceUid: __expr__
+            model: { refId: E, type: reduce, expression: D, reducer: last }
