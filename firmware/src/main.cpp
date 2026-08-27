@@ -37,7 +37,7 @@
 #include "deviceid.h"            // deviceNameValid(), chipSeedName() — host-testable
 #include "geo.h"                 // geoDistM() — movement detection, host-testable
 
-#define FW_VERSION "2.93"   // verNewer() compares dotted INTEGER components: 2.10 > 2.9, and 2.7 < 2.68 — never drop a trailing digit
+#define FW_VERSION "2.94"   // verNewer() compares dotted INTEGER components: 2.10 > 2.9, and 2.7 < 2.68 — never drop a trailing digit
 
 #define SerialMon Serial
 #define SerialAT  Serial1
@@ -2279,6 +2279,11 @@ void loop() {
   // powered report of the very first powered session failed exactly that way
   // (11:21Z 2026-08-27) and the unit fell back to sleep cycles every 3 minutes.
   if (!mqtt.connected()) poweredReconnect();            // session may have died since the last cycle
+  // Same at-least-once rule as the battery path: a fix whose follow-up frame was not
+  // echoed last cycle (3 of 11 on the first mains session, 2026-08-27) is re-sent as
+  // a backfill point at its own timestamp before this cycle's frame; the echo of this
+  // cycle's frame then clears it.
+  if (mqtt.connected()) publishPendingFix();
   bool ok = mqtt.connected() &&
             publishSample(s, now, false, doorChanged ? "door" : "powered", rssiDbm);
   if (!ok && poweredReconnect())                        // one retry on a fresh session before giving up the regime
