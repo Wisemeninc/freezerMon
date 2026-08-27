@@ -24,6 +24,7 @@
 #include <esp_task_wdt.h>
 #include <rom/rtc.h>             // rtc_get_reset_reason(core) — ROM-level reset forensics
 #include <time.h>
+#include <sys/time.h>          // gettimeofday: the RTC clock keeps running in deep sleep -> measured sleep length
 #include <WiFi.h>
 #include <WebServer.h>
 #include <Preferences.h>         // NVS-backed device name (survives OTA; set via /setname)
@@ -36,7 +37,7 @@
 #include "deviceid.h"            // deviceNameValid(), chipSeedName() — host-testable
 #include "geo.h"                 // geoDistM() — movement detection, host-testable
 
-#define FW_VERSION "2.86"
+#define FW_VERSION "2.87"   // verNewer() compares dotted INTEGER components: 2.10 > 2.9, and 2.7 < 2.68 — never drop a trailing digit
 
 #define SerialMon Serial
 #define SerialAT  Serial1
@@ -81,6 +82,7 @@ RTC_DATA_ATTR uint8_t  gnssZeroSatStreak = 0;   // GNSS-wedge watchdog: consecut
 RTC_DATA_ATTR float    lastLat = 0, lastLon = 0; // most recent fix — movement baseline; NOT auto-published (see gpsFreshThisWake)
 static bool gpsFreshThisWake = false;            // set only by a successful fix THIS wake — a published coordinate is a measurement, not a memory
 static float lastFixHdop = 0;                    // quality of the fix behind lastLat/lastLon (published with it)
+RTC_DATA_ATTR int64_t sleepStartUs = 0;          // RTC clock at deep-sleep entry; measured sleep length is applied at the next boot
 RTC_DATA_ATTR uint8_t gpsMissStreak = 0;         // consecutive attempts with no gate-passing fix (indoors) — drives the backoff
 // Outcome of the most recent GNSS attempt, published in EVERY frame as gps_last /
 // gps_last_s / gps_last_hdop so a failed hunt is visible from the dashboard rather
@@ -131,6 +133,7 @@ RTC_DATA_ATTR uint8_t  movingActive = 0;        // in telemetry as `moving`; dri
 RTC_DATA_ATTR uint8_t  stillStreak = 0;         // consecutive near-still fixes while moving
 RTC_DATA_ATTR uint8_t  moveAlertPending = 0;    // `moving` alert queued until MQTT is next up
 RTC_DATA_ATTR uint8_t  tempAlertPending = 0;    // `temp_breach` alert queued — the latch can happen on a boot that dies before MQTT (double-boot pattern), so the edge is decoupled from the publish
+static Sample lastSample; static bool lastSampleValid = false;   // main thread's most recent reading, for /status
 RTC_DATA_ATTR uint8_t  coldChargeActive = 0;    // cold-charge condition latched (one-shot alert + re-arm hysteresis)
 
 uint32_t awakeStart = 0;
@@ -182,17 +185,46 @@ static bool otaUrlSafe(const char *u) {
     if (c < 0x21 || c > 0x7e) return false;            // no controls/space/non-ASCII (blocks CR/LF)
     if (c == '"' || c == '\\') return false;           // no quote/backslash
   }
+#ifdef OTA_MANIFEST_URL
+  // Host pin: the device only ever legitimately fetches from the manifest's host. Without
+  // this a cmd publisher could drive the fleet to GET any host:port reachable from the
+  // cellular bearer (carrier-internal RFC1918 included) with /log as a status oracle.
+  {
+    const char *m = OTA_MANIFEST_URL; m += strncmp(m, "https://", 8) == 0 ? 8 : 7;
+    const char *a = u + (strncmp(u, "https://", 8) == 0 ? 8 : 7);
+    size_t ml = strcspn(m, "/:"), al = strcspn(a, "/:");
+    if (ml == 0 || ml != al || strncasecmp(m, a, ml) != 0) return false;
+  }
+#endif
   return true;
 }
 
-static volatile bool mqttInboundSeen = false;   // any downlink this session = the socket genuinely works both ways
+static bool verStrictOk(const char *v) {           // ^[0-9]{1,3}\.[0-9]{1,3}$
+  int a = 0, b = 0, dots = 0;
+  for (const char *c = v; *c; c++) {
+    if (*c == '.') { if (++dots > 1) return false; }
+    else if (*c < '0' || *c > '9') return false;
+    else if (dots == 0) { if (++a > 3) return false; } else { if (++b > 3) return false; }
+  }
+  return dots == 1 && a > 0 && b > 0;
+}
+static volatile bool mqttInboundSeen = false;   // any downlink this session
+static volatile bool mqttEchoSeen = false;      // the broker returned OUR retained telemetry frame: proof the publish path delivered
 static bool pendingFixSent = false;             // publishPendingFix wrote a backfill frame this wake
 static void mqttCallback(char *topic, byte *payload, unsigned int len) {
-  (void)topic;
   mqttInboundSeen = true;
+  // Our own live telemetry frame is published retained; subscribing to that topic makes
+  // the broker hand it straight back. Receiving it proves the broker STORED what this
+  // session published — the only delivery evidence QoS-0 PubSubClient can give us
+  // (publish() returns true into dead sockets). A cmd downlink is optional and may not
+  // exist (review 2026-08-27), so it is no longer the liveness signal.
+  if (strstr(topic, "/telemetry")) { mqttEchoSeen = true; return; }
   JsonDocument doc;
   if (deserializeJson(doc, payload, len)) return;
   const char *u = doc["ota_url"], *v = doc["ota_ver"];
+  // ota_ver is echoed into log lines (and from there into crash_log telemetry): accept
+  // only <1-3 digits>.<1-3 digits>, the same contract PublishFirmware.ts enforces.
+  if (v && !verStrictOk(v)) { logLine("[ota] rejected malformed ota_ver"); return; }
   if (u && v && verNewer(v, FW_VERSION)) {           // anti-rollback: newer only
     if (!otaUrlSafe(u)) { logLine("[ota] rejected unsafe url"); return; }
     strlcpy(otaUrl, u, sizeof(otaUrl));
@@ -221,14 +253,24 @@ static bool consoleTakeModem() { return modemLock && xSemaphoreTakeRecursive(mod
 static void consoleGiveModem() { if (modemLock) xSemaphoreGiveRecursive(modemLock); }
 static void mainTakeModem()    { if (modemLock) xSemaphoreTakeRecursive(modemLock, portMAX_DELAY); }
 static void mainGiveModem()    { if (modemLock) xSemaphoreGiveRecursive(modemLock); }
+// Scope guard for console handlers: the give happens on every exit path, so a future
+// early `return` inside a handler cannot leave the console locked until reboot.
+struct ConsoleModemHold { bool held; ConsoleModemHold() : held(consoleTakeModem()) {} ~ConsoleModemHold() { if (held) consoleGiveModem(); } };
 
 // Same-origin gate for every state-changing console endpoint (/setname, /update,
 // /update/check). Fail-closed: a request with NO Origin header is refused as well —
 // browsers always send it on cross-origin POSTs, so a missing header is a client we
 // cannot vouch for. Stops a drive-by page on the AP from erasing the inactive OTA
 // slot or renaming the unit.
+// The AP address is fixed by the ESP32 default softAP config (no softAPConfig call); if
+// that ever becomes configurable, derive this from WiFi.softAPIP(). No port: the console
+// listens on :80 only.
 static bool sameOriginRequest() {
-  return debugServer.hasHeader("Origin") && debugServer.header("Origin") == "http://192.168.4.1";
+  if (debugServer.hasHeader("Origin") && debugServer.header("Origin") == "http://192.168.4.1") return true;
+  // Scripted provisioning (curl) sends no Origin. A custom header cannot be attached to a
+  // cross-origin browser request without a CORS preflight this server never answers, so
+  // requiring it is exactly as strong as the Origin check for the CSRF case.
+  return debugServer.hasHeader("X-FreezerMon");
 }
 
 // Runtime device identity. Resolved once per boot from NVS (survives OTA, since
@@ -237,6 +279,7 @@ static bool sameOriginRequest() {
 // DEVICE_ID in config.h is only the seed default for an un-provisioned unit.
 char deviceId[32] = "cooler-01";   // safe placeholder until resolveDeviceId() runs
 
+#define PAYLOAD_MAX 1152 // MQTT frame buffer; mqtt.setBufferSize must exceed it plus topic + headers
 #define LOG_RING 96      // holds a full multi-chunk OTA trace in /log
 #define LOG_LINE 160
 // Fixed-size ring, no heap: logLine() runs on BOTH the main thread and the dbgweb
@@ -268,11 +311,18 @@ static void logLine(const char *fmt, ...) {
   vsnprintf(buf, sizeof(buf), fmt, ap);
   va_end(ap);
   SerialMon.println(buf);
-  if (crashMagic != 0xC0DEC0DEUL) { memset(crashRing, 0, sizeof(crashRing)); crashHead = 0; crashMagic = 0xC0DEC0DEUL; }
-  strlcpy(crashRing[crashHead], buf, CRASH_LINE);
+  if (crashMagic != 0xC0DEC0DEUL || crashHead >= CRASH_LINES) { memset(crashRing, 0, sizeof(crashRing)); crashHead = 0; crashMagic = 0xC0DEC0DEUL; }
+  // The ring is published as telemetry (crash_log) over a session the modem does not
+  // authenticate: sanitize at the sink — printable ASCII only — so a device-influenced
+  // string (multipart filename, cmd fields) can never smuggle control bytes or markup
+  // into the DB. Credential-bearing strings (otaUrl, MQTT_PASS, APN) must never be
+  // %s'd into a log line at all — grep before adding one.
+  { char *d = crashRing[crashHead]; size_t k = 0;
+    for (const char *sp = buf; *sp && k < CRASH_LINE - 1; sp++) { unsigned char ch = (unsigned char)*sp; d[k++] = (ch >= 0x20 && ch <= 0x7e) ? (char)ch : '?'; }
+    d[k] = 0; }
   crashHead = (crashHead + 1) % CRASH_LINES;
   portENTER_CRITICAL(&logMux);
-  memcpy(logRing[logHead], buf, LOG_LINE);            // NUL-terminated by vsnprintf
+  strlcpy(logRing[logHead], buf, LOG_LINE);           // copy the string, not the stack bytes after its NUL
   logHead = (logHead + 1) % LOG_RING;
   if (logCount < LOG_RING) logCount++;
   portEXIT_CRITICAL(&logMux);
@@ -342,6 +392,9 @@ static void saveMonState() {
   p.putUChar("mvpd",  moveAlertPending);
   p.putUChar("tpnd",  tempAlertPending);
   p.putULong("agps",  lastAgpsEpoch);
+  p.putUChar("rsg",   reportsSinceGps);   // GPS cadence counter: without this every brownout boot forced a full hunt
+  p.putUChar("gzs",   gnssZeroSatStreak);
+  p.putUChar("ccha",  coldChargeActive);  // one-shot latch: without this the cold_charge alert re-fired every brownout
   p.end();
 }
 static void loadMonState() {
@@ -356,6 +409,9 @@ static void loadMonState() {
   moveAlertPending    = p.getUChar("mvpd", 0);
   tempAlertPending    = p.getUChar("tpnd", 0);
   lastAgpsEpoch       = p.getULong("agps", 0);
+  reportsSinceGps     = p.getUChar("rsg", 0xFF);
+  gnssZeroSatStreak   = p.getUChar("gzs", 0);
+  coldChargeActive    = p.getUChar("ccha", 0);
   p.end();
 }
 
@@ -568,8 +624,8 @@ static void startDebugAp() {
   // limit; if the radio still refuses the SSID, fall back to a safe fixed one so
   // /setname (the only field rename path) is never stranded.
   if (!WiFi.softAP(ssid, DEBUG_AP_PASSWORD)) WiFi.softAP("freezermon-setup", DEBUG_AP_PASSWORD);
-  static const char *setnameHdr[] = { "Origin" };
-  debugServer.collectHeaders(setnameHdr, 1);           // /setname CSRF same-origin check
+  static const char *setnameHdr[] = { "Origin", "X-FreezerMon" };
+  debugServer.collectHeaders(setnameHdr, 2);           // CSRF gate: browser Origin, or the provisioning header (curl)
 
   debugServer.on("/", []() {
     debugServer.send(200, "text/plain",
@@ -584,8 +640,11 @@ static void startDebugAp() {
   });
   debugServer.on("/status", []() {
     debugServer.sendHeader("Refresh", "15");            // browser auto-reload while monitoring
+    // Served from the main thread's last reading: readSensors() bit-bangs the OneWire
+    // bus and re-drives DOOR_PIN, and doing that from the console task while the main
+    // thread samples corrupts DS18B20 conversions (NAN -> resets the breach streak).
     Sample s;
-    readSensors(s);
+    if (lastSampleValid) s = lastSample; else readSensors(s);
     JsonDocument doc;
     doc["device"]    = deviceId;
     doc["fw"]        = FW_VERSION;
@@ -610,7 +669,7 @@ static void startDebugAp() {
   debugServer.on("/log", []() {
     debugServer.sendHeader("Refresh", "15");            // browser auto-reload while monitoring
     String out;
-    out.reserve(LOG_RING * 64);
+    out.reserve(LOG_RING * LOG_LINE / 2);               // typical line is well under LOG_LINE; avoids most reallocs
     char line[LOG_LINE];
     portENTER_CRITICAL(&logMux);
     uint8_t count = logCount, head = logHead;
@@ -635,7 +694,7 @@ static void startDebugAp() {
       doc["powered"]        = true;
       doc["mqtt_connected"] = mqtt.connected();
       doc["note"] = "live modem queries suspended while MQTT session is held";
-    } else if (!consoleTakeModem()) {
+    } else if (ConsoleModemHold hold; !hold.held) {
       // main thread owns the modem UART right now (attach/publish/OTA in progress)
       doc["busy"] = true;
       doc["note"] = "modem attach/publish in progress - refresh in ~30s";
@@ -665,8 +724,7 @@ static void startDebugAp() {
       doc["pdp_active"]  = atQuery("+CGACT?");            // context activation state
       doc["pdp_define"]  = atQuery("+CGDCONT?");          // configured contexts / APNs
       doc["dns_lookup"]  = atQuery("+CDNSGIP=\"" MQTT_HOST "\"", 5000);  // resolve via the network-provided DNS
-      consoleGiveModem();
-    }
+    }                                                     // hold released by the guard
     doc["mqtt_host"] = MQTT_HOST;
     doc["mqtt_port"] = MQTT_PORT;
     String out;
@@ -683,7 +741,7 @@ static void startDebugAp() {
       doc["note"] = "GNSS debug unavailable while MQTT session is held (UART owned by main loop)";
       doc["last_lat"] = lastLat;
       doc["last_lon"] = lastLon;
-    } else if (!consoleTakeModem()) {
+    } else if (ConsoleModemHold hold; !hold.held) {
       doc["busy"] = true;
       doc["note"] = "modem attach/publish in progress - refresh in ~30s";
     } else {
@@ -731,8 +789,7 @@ static void startDebugAp() {
       }
       doc["last_reported_lat"] = lastLat;
       doc["last_reported_lon"] = lastLon;
-      consoleGiveModem();
-    }
+    }                                                     // hold released by the guard
     String out;
     serializeJsonPretty(doc, out);
     debugServer.send(200, "application/json", out);
@@ -746,7 +803,8 @@ static void startDebugAp() {
       debugServer.send(503, "text/plain", "unavailable while the MQTT session is held (powered regime)\n");
       return;
     }
-    if (!consoleTakeModem()) {
+    ConsoleModemHold hold;
+    if (!hold.held) {
       debugServer.send(503, "text/plain", "modem busy (attach/publish/OTA in progress) - retry in ~30s\n");
       return;
     }
@@ -755,7 +813,6 @@ static void startDebugAp() {
     modem.sendAT("+CMGL=\"ALL\"");            // list all stored messages
     String res;
     modem.waitResponse(10000L, res);
-    consoleGiveModem();
     res.replace("\r", "");
     debugServer.send(200, "text/plain",
                      res.length() > 4 ? res : "no SMS stored\n");
@@ -857,7 +914,7 @@ static void startDebugAp() {
       // Checked here, not only in the POST handler: the partition erase (Update.begin)
       // happens in this callback, before the handler ever runs.
       if (!sameOriginRequest()) { upFwBlocked = true; logLine("[ota] /update refused - cross-origin"); return; }
-      logLine("[ota] receiving %s (%s)", up.filename.c_str(), up.name.c_str());
+      logLine("[ota] receiving %.16s (%.8s)", up.filename.c_str(), up.name.c_str());   // capped: these strings reach crash_log
       if (isSig) { upSigLen = 0; }
       else {
         upBinDone = false;
@@ -884,7 +941,7 @@ static void startDebugAp() {
         uint8_t z = 0;
         mbedtls_md_update(&upMd, (const uint8_t *)v.c_str(), v.length());
         mbedtls_md_update(&upMd, &z, 1);
-        logLine("[ota] /update ver=%s", v.c_str());
+        logLine("[ota] /update ver=%.15s", v.c_str());
       }
     } else if (up.status == UPLOAD_FILE_WRITE) {
       if (isSig) {                                 // keep only the first 256 bytes (real sig; rest is padding)
@@ -1162,13 +1219,21 @@ static void otaNoteFailure(const char *ver) {
   String fv = p.getString("otafv", ""); uint8_t fc = p.getUChar("otafc", 0);
   if (fv != ver) { fc = 0; p.putString("otafv", ver); }
   if (fc < 255) fc++;
-  p.putUChar("otafc", fc); p.end();
-  logLine("[ota] %s failure #%u recorded", ver, fc);
+  uint8_t tc = p.getUChar("otatc", 0); if (tc < 255) tc++;
+  p.putUChar("otafc", fc); p.putUChar("otatc", tc); p.end();
+  logLine("[ota] %s failure #%u recorded (%u consecutive overall)", ver, fc, tc);
 }
+#ifndef OTA_MAX_FAILS_TOTAL
+#define OTA_MAX_FAILS_TOTAL 6    // consecutive failed pulls across ANY version labels; only a successful install resets it
+#endif
 static bool otaRefused(const char *ver) {
   Preferences p; p.begin("freezermon", true);
-  String fv = p.getString("otafv", ""); uint8_t fc = p.getUChar("otafc", 0); p.end();
+  String fv = p.getString("otafv", ""); uint8_t fc = p.getUChar("otafc", 0); uint8_t tc = p.getUChar("otatc", 0); p.end();
   if (fv == ver && fc >= OTA_MAX_FAILS) { logLine("[ota] %s refused - failed %u times", ver, fc); return true; }
+  // Per-version memory alone is evadable by cycling ota_ver labels (review 2026-08-27):
+  // a global consecutive counter closes that; it is zeroed at boot when FW_VERSION
+  // differs from the version recorded at the previous boot, i.e. after a real install.
+  if (tc >= OTA_MAX_FAILS_TOTAL) { logLine("[ota] refused - %u consecutive failed pulls, waiting for a successful install", tc); return true; }
   return false;
 }
 
@@ -1387,7 +1452,8 @@ static bool readGnssFix(float *outLat, float *outLon, int *satsUsed, float *hdop
   // "55 GLONASS satellites" of 2.75). Bounded by the N/S anchor instead; before a
   // fix (no anchor) fall back to the first three fields.
   {
-    int nSv = ns > 0 ? ns - 2 : 3;
+    int nSv = ns > 0 ? ns - 2 : 0;
+    if (nSv == 0) { for (int i = 1; i < n && i <= 4 && tok[i].length(); i++) nSv = i; }   // pre-fix: SV fields run until the empty <lat>
     if (nSv > 4) nSv = 4;
     int sum = 0;
     for (int i = 1; i <= nSv && i < n; i++) { int v = tok[i].toInt(); sum += v; if (svs) svs[i - 1] = v; }
@@ -1398,10 +1464,13 @@ static bool readGnssFix(float *outLat, float *outLon, int *satsUsed, float *hdop
   if (hdopOut && ns + 9 < n) *hdopOut = tok[ns + 9].toFloat();                  // HDOP (0 if absent)
   float lat = tok[ns - 1].toFloat();
   float lon = tok[ns + 1].toFloat();
-  // some firmware sends decimal degrees, some ddmm.mmmmmm — out-of-range
-  // values can only be the latter, convert those
-  if (fabsf(lat) > 90.0f)  { float d = floorf(lat / 100.0f); lat = d + (lat - d * 100.0f) / 60.0f; }
-  if (fabsf(lon) > 180.0f) { float d = floorf(lon / 100.0f); lon = d + (lon - d * 100.0f) / 60.0f; }
+  // Some firmware sends decimal degrees, some zero-padded ddmm.mmmmmm / dddmm.mmmmmm.
+  // Decide by the token's digit count before the '.', not by magnitude: "00006.0000"
+  // (0°06' E, ddmm) is 6.0 by magnitude and would have passed as 6 degrees — a 60x
+  // error near the prime meridian or equator (2026-08-26 review).
+  auto intDigits = [](const String &t) { int i = 0, n = 0; if (t.length() && (t[0] == '-' || t[0] == '+')) i = 1; while (i < (int)t.length() && isdigit((unsigned char)t[i])) { n++; i++; } return n; };
+  if (intDigits(tok[ns - 1]) >= 4) { float d = floorf(lat / 100.0f); lat = d + (lat - d * 100.0f) / 60.0f; }   // ddmm has 4, decimal <= 2
+  if (intDigits(tok[ns + 1]) >= 5) { float d = floorf(lon / 100.0f); lon = d + (lon - d * 100.0f) / 60.0f; }   // dddmm has 5, decimal <= 3
   if (tok[ns] == "S")     lat = -lat;
   if (tok[ns + 2] == "W") lon = -lon;
   if (lat == 0 && lon == 0) return false;
@@ -1449,17 +1518,19 @@ static void updateMovement(float prevLat, float prevLon) {
 // re-published as a BACKFILLED point (its own ts, gps_backfill=1) on following
 // wakes until one of the publishes actually lands; cleared only after the same
 // wake ALSO delivered its normal frame, which is the best liveness signal we have.
+struct PendingFix { uint32_t ts; float lat, lon, hdop; uint8_t sats; };   // one NVS blob, one write per new fix
 static void savePendingFix(uint32_t ts, float lat, float lon, float hdop, uint8_t sats) {
+  PendingFix f = { ts, lat, lon, hdop, sats };
   Preferences p; p.begin("freezermon", false);
-  p.putULong("pfts", ts); p.putFloat("pfla", lat); p.putFloat("pflo", lon);
-  p.putFloat("pfhd", hdop); p.putUChar("pfsa", sats); p.end();
+  PendingFix cur = {0, 0, 0, 0, 0}; p.getBytes("pfix", &cur, sizeof(cur));
+  if (memcmp(&cur, &f, sizeof(f)) != 0) p.putBytes("pfix", &f, sizeof(f));   // NVS is flash: skip identical rewrites
+  p.end();
 }
-static void clearPendingFix() { Preferences p; p.begin("freezermon", false); p.putULong("pfts", 0); p.end(); }
+static void clearPendingFix() { Preferences p; p.begin("freezermon", false); if (p.isKey("pfix")) p.remove("pfix"); p.end(); }
 static bool publishPendingFix() {                 // true = nothing pending or sent OK
-  uint32_t ts; float la, lo, hd; uint8_t sa;
-  { Preferences p; p.begin("freezermon", true);
-    ts = p.getULong("pfts", 0); la = p.getFloat("pfla", 0); lo = p.getFloat("pflo", 0);
-    hd = p.getFloat("pfhd", 0); sa = p.getUChar("pfsa", 0); p.end(); }
+  PendingFix f = {0, 0, 0, 0, 0};
+  { Preferences p; p.begin("freezermon", true); p.getBytes("pfix", &f, sizeof(f)); p.end(); }
+  uint32_t ts = f.ts; float la = f.lat, lo = f.lon, hd = f.hdop; uint8_t sa = f.sats;
   if (!ts) return true;
   if (!mqtt.connected()) return false;
   JsonDocument doc;
@@ -1492,11 +1563,6 @@ static bool maybeGps(uint32_t fixTimeoutS) {
   // no-fix cycle (unit indoors) must wait N reports again — resetting only on
   // success made GNSS hunt 90 s on EVERY wake and starve the MQTT session.
   reportsSinceGps = 0;
-  // Constellations: the firmware never selected any, so the engine ran the modem's
-  // default (commonly GPS+GLONASS on A76XX). Ask for all four — GPS+GLONASS+BeiDou+
-  // Galileo (+CGNSSMODE bitmask 1|2|4|8 = 15) — before powering the engine; more
-  // satellites in view is the cheapest HDOP improvement there is. Best-effort: an
-  // ERROR leaves the default, and the read-back is logged so /log shows what stuck.
   // NO +CGNSSMODE traffic (2.83). Between 2.76 and 2.82 every hunt was preceded by
   // mode writes/probes ("15", "=?", "3", "3,1" — the engine kept answering 1, i.e.
   // GPS+GLONASS+Galileo, and refused the rest). In the same window the engine began
@@ -1654,7 +1720,13 @@ static bool publishSample(const Sample &s, uint32_t nowEpoch, bool buffered,
   if (g_resetStr && strcmp(g_resetStr, "deepsleep") != 0) {   // reset forensics on every non-sleep boot
     doc["rr0"] = (int)rtc_get_reset_reason(0);            // ROM-level per-core reset reasons (rom/rtc.h)
     doc["rr1"] = (int)rtc_get_reset_reason(1);
-    if (crashSnapshot.length()) doc["crash_log"] = crashSnapshot;   // last log lines before a WDT/PANIC death
+    if (crashSnapshot.length()) {                          // published once, budgeted to what the frame can still carry
+      size_t used = measureJson(doc) + 24;                                   // 24 = key + quotes + margin
+      size_t room = used < PAYLOAD_MAX - 1 ? PAYLOAD_MAX - 1 - used : 0;
+      String cl = crashSnapshot; if (cl.length() > room) cl = cl.substring(0, room > 0 ? room : 0);
+      if (cl.length()) doc["crash_log"] = cl;
+      crashSnapshot = ""; crashMagic = 0;
+    }
   }
   if (gpsLastStatus) {                                   // outcome of the most recent hunt (see gpsLastStatus)
     doc["gps_last"]      = gpsLastStatus;
@@ -1681,7 +1753,7 @@ static bool publishSample(const Sample &s, uint32_t nowEpoch, bool buffered,
   // parse ... bo_streak:"), which is where ALL of tonight's "lost fixes" actually
   // died. The dead-socket theories (2.78/2.82/2.84) were chasing this. The guard
   // below makes the failure loud if the frame ever outgrows the buffer again.
-  char topic[64], payload[768];
+  char topic[64], payload[PAYLOAD_MAX];         // largest frame (all breadcrumbs + budgeted crash_log) is ~820 B; keep headroom
   snprintf(topic, sizeof(topic), "freezer/%s/telemetry", deviceId);
   size_t n = serializeJson(doc, payload, sizeof(payload));
   size_t need = measureJson(doc);
@@ -1735,9 +1807,12 @@ static void goToSleep(uint32_t seconds) {
   delay(200);
   markPhase(5);                                         // teardown done (wifi+mqtt+modem off)
 
-  // age buffered samples and the epoch estimate by the coming sleep window
-  for (uint8_t i = 0; i < rtcBufCount; i++) rtcBuf[i].ageS += seconds;
-  if (rtcEpoch) rtcEpoch += seconds + (millis() - awakeStart) / 1000UL;
+  // Age the epoch estimate by this wake's awake time now; the SLEEP part is measured
+  // at the next boot from the RTC clock (which keeps running in deep sleep) — a
+  // door-open wake ends the sleep early, and aging by the scheduled length put
+  // backfilled timestamps minutes to hours in the future (2026-08-26 review).
+  if (rtcEpoch) rtcEpoch += (millis() - awakeStart) / 1000UL;
+  { struct timeval tv; gettimeofday(&tv, NULL); sleepStartUs = (int64_t)tv.tv_sec * 1000000LL + tv.tv_usec; }
 
   // door-open wake: reed opens -> pin pulled HIGH. RTC-domain pullup required —
   // the digital-domain INPUT_PULLUP dies in deep sleep.
@@ -1763,6 +1838,14 @@ static void goToSleep(uint32_t seconds) {
 void setup() {
   awakeStart = millis();
   bootCount++;
+  if (sleepStartUs) {                                   // woke from deep sleep: age RTC state by the MEASURED sleep
+    struct timeval tv; gettimeofday(&tv, NULL);
+    int64_t nowUs = (int64_t)tv.tv_sec * 1000000LL + tv.tv_usec;
+    uint32_t slept = nowUs > sleepStartUs ? (uint32_t)((nowUs - sleepStartUs) / 1000000LL) : 0;
+    for (uint8_t i = 0; i < rtcBufCount; i++) rtcBuf[i].ageS += slept;
+    if (rtcEpoch) rtcEpoch += slept;
+    sleepStartUs = 0;
+  }
   SerialMon.begin(115200);
   {                      // crash forensics: snapshot the pre-reset log tail before anything logs
     esp_reset_reason_t r0 = esp_reset_reason();
@@ -1778,6 +1861,9 @@ void setup() {
   }
   resolveDeviceId();     // NVS -> deviceId, before the AP SSID / MQTT topics use it
   if (!modemLock) modemLock = xSemaphoreCreateRecursiveMutex();   // before the dbgweb task can exist
+  { Preferences p; p.begin("freezermon", false);                  // a successful install is the only thing that clears OTA failure memory
+    if (p.getString("otafw", "") != FW_VERSION) { p.putString("otafw", FW_VERSION); p.putUChar("otatc", 0); p.putUChar("otafc", 0); }
+    p.end(); }
 
   // silicon-enforced sleep guarantee: if any modem call wedges past the awake
   // budget, the task WDT resets the chip instead of draining the battery
@@ -1830,6 +1916,7 @@ void setup() {
   Sample s;
   readSensors(s);
   evaluateAlarm(s);
+  lastSample = s; lastSampleValid = true;               // /status reads this copy
 
   bool published = false;
   if (awakeBudgetLeft()) {
@@ -1849,7 +1936,7 @@ void setup() {
       if (now) rtcEpoch = now;          // sync the RTC estimate
       else     now = rtcEpoch;          // clock query failed -> use aged estimate
 
-      mqtt.setBufferSize(1024);   // must exceed topic + largest frame (payload[768])
+      mqtt.setBufferSize(1400);      // >= topic + headers + payload[1152]   // must exceed topic + largest frame (payload[768])
       mqtt.setSocketTimeout(15);
       mqtt.setKeepAlive(180);      // OTA downloads run minutes with no mqtt.loop() — don't let the broker drop us mid-flash
       mqtt.setCallback(mqttCallback);
@@ -1892,8 +1979,9 @@ void setup() {
         char cmdTopic[64];
         snprintf(cmdTopic, sizeof(cmdTopic), "freezer/%s/cmd", deviceId);
         mqtt.subscribe(cmdTopic);
+        { char echoTopic[64]; snprintf(echoTopic, sizeof(echoTopic), "freezer/%s/telemetry", deviceId); mqtt.subscribe(echoTopic); }
         uint32_t tCmd = millis();
-        while (millis() - tCmd < 3000UL && !otaPending) { mqtt.loop(); delay(20); }
+        while (millis() - tCmd < 3000UL && (!otaPending || !mqttEchoSeen)) { mqtt.loop(); delay(20); }
         if (otaPending) {
           if (s.extPower || s.vbatMv >= OTA_MIN_VBAT_MV) {
             performOta(otaUrl, otaVer);       // reboots on success
@@ -1902,10 +1990,10 @@ void setup() {
           }
           otaPending = false;
         }
-        // Two-way-verified clear: this wake's backfill went out AND the broker
-        // demonstrably talked back to us (retained cmd arrived) — only now is the
-        // pending fix safe to drop. A dead socket fails one of the two.
-        if (pendingFixSent && mqttInboundSeen) clearPendingFix();
+        // Delivery-verified clear: this wake's backfill went out AND the broker echoed
+        // back the retained frame published right after it on the same socket. A dead
+        // socket fails the echo; an absent retained cmd no longer matters.
+        if (pendingFixSent && mqttEchoSeen) clearPendingFix();
       } else {
         // Attach + IP can succeed while the carrier drops the user plane
         // (the 2026-07-13 outage — a dead SIM). Log PDP state so a repeat is
@@ -2084,6 +2172,7 @@ void loop() {
   Sample s;
   readSensors(s);
   evaluateAlarm(s);
+  lastSample = s; lastSampleValid = true;               // /status reads this copy
   gpsFreshThisWake = false;                             // powered loop never reboots — freshness is per report cycle
   maybeGps(GPS_FIX_TIMEOUT_S);
   if (moveAlertPending && mqtt.connected()) {           // movement detected by that fix

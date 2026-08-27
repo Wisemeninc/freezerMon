@@ -11,6 +11,5 @@ datasources:
       version: Flux
       organization: $INFLUX_ORG
       defaultBucket: $INFLUX_BUCKET
-      tlsSkipVerify: true
     secureJsonData:
       token: $INFLUX_TOKEN

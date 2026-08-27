@@ -25,7 +25,7 @@
 // connections to the broker, and modem authmode=0 (no cert-CN check).
 // Comment out to always use the hostname.
 #define MQTT_HOST_IP         "203.0.113.10"
-#define MQTT_PORT            1883                // set 8883 when flashing the TLS env
+#define MQTT_PORT            8883                // TLS (default build env). 1883 only for LAN-only bring-up with the plain env
 #define MQTT_USER            "freezer"
 #define MQTT_PASS            "change-me"
 // TLS: flash with `pio run -e t-a7608-tls -t upload` (defines USE_TLS) and set MQTT_PORT 8883

@@ -5,7 +5,8 @@ services:
     image: eclipse-mosquitto:2.0
     restart: unless-stopped
     ports:
-      - "1883:1883"          # device MQTT (use 8883 + TLS for production, see README)
+      - "127.0.0.1:1883:1883"   # plaintext MQTT stays on the host only; devices reach the broker over 8883/TLS (Traefik or the
+                                # mosquitto.conf TLS listener). Bind 0.0.0.0 ONLY for a LAN-only test with the plain firmware env.
     volumes:
       - ./mosquitto/config:/mosquitto/config:ro
       - mosquitto-data:/mosquitto/data
@@ -33,7 +34,7 @@ services:
       # read-only ingest identity (see mosquitto/config/acl) — never the device credential
       MQTT_USER: ${TELEGRAF_MQTT_USER:-telegraf}
       MQTT_PASSWORD: ${TELEGRAF_MQTT_PASSWORD:?set in .env}
-      INFLUX_TOKEN: ${INFLUX_TOKEN:?set in .env}
+      INFLUX_TOKEN: ${TELEGRAF_INFLUX_TOKEN:?set in .env}   # write-only token for the telemetry bucket (never the admin token)
       INFLUX_ORG: ${INFLUX_ORG:-freezermon}
       INFLUX_BUCKET: ${INFLUX_BUCKET:-telemetry}
     volumes:
@@ -52,7 +53,7 @@ services:
       GF_USERS_AUTO_ASSIGN_ORG_ROLE: "Viewer"   # new users (operator) are read-only
       INFLUX_ORG: ${INFLUX_ORG:-freezermon}
       INFLUX_BUCKET: ${INFLUX_BUCKET:-telemetry}
-      INFLUX_TOKEN: ${INFLUX_TOKEN:?set in .env}
+      INFLUX_TOKEN: ${GRAFANA_INFLUX_TOKEN:?set in .env}    # read-only token; a compromised Grafana cannot delete history or mint tokens
     volumes:
       - grafana-data:/var/lib/grafana
       - ./grafana/provisioning:/etc/grafana/provisioning:ro

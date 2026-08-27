@@ -49,7 +49,10 @@ if (!/^[A-Za-z0-9_-]{16,}$/.test(token)) {
   process.exit(1);
 }
 
-await $`ssh ${SERVER} mkdir -p /opt/freezermon/ota/${token}`;
+// Every version gets its own directory and the manifest is written LAST: a device
+// mid-download keeps reading the pieces it started on instead of assembling a mix of
+// two images (which fails the signature and burns a full retry of cellular data).
+await $`ssh ${SERVER} mkdir -p /opt/freezermon/ota/${token}/${ver}`;
 // The unsplit image is NOT published: it holds every compiled-in credential and the
 // token-path is served over plain HTTP. The device only needs the pieces + .sig;
 // the WiFi /update form is fed straight from the build host. Remove a stale copy too.
@@ -105,10 +108,10 @@ for (let i = 0; i < nPieces; i++) {
 const sigPadded = Buffer.alloc(256 + OVERLAP);
 sig.copy(sigPadded, 0);
 writeFileSync(join(dir, "firmware.bin.sig"), sigPadded);   // fetched by the device at <url>.sig
-await $`scp -q ${dir}/firmware.bin.* ${SERVER}:/opt/freezermon/ota/${token}/`;
+await $`scp -q ${dir}/firmware.bin.* ${SERVER}:/opt/freezermon/ota/${token}/${ver}/`;
 
 // Plain HTTP; token path is the access control; ESP32 Update validates the image.
-const url = `http://${HOST}/fw/${token}/firmware.bin`;
+const url = `http://${HOST}/fw/${token}/${ver}/firmware.bin`;
 
 // The device fetches <url>.000, .001, … reading (plen - ota_skip) real bytes each
 // until ota_size total (the unsplit firmware.bin is deliberately not served).
@@ -118,10 +121,14 @@ await $`ssh ${SERVER} tee /opt/freezermon/ota/${token}/manifest.json < ${new Res
 // Retained command, published as the `publisher` identity (ACL: cmd topics only).
 // The remote command line contains exactly one caller-influenced value — the topic —
 // and it was validated above against [a-z0-9-]{1,21}; the payload travels on stdin.
+// INVARIANT: `topic` is the ONLY caller-influenced value in `remote`, and `device` must
+// stay behind the [a-z0-9-]{1,21} check above. Anything else goes on stdin, never here.
 const topic = `freezer/${device}/cmd`;
+// .env is READ with sed, never sourced: Compose parses it as data, so a value like
+// `pw;id` is legal there and must not become root shell here.
 const remote =
-  "set -a; . /opt/freezermon/.env; set +a; " +
-  "exec docker exec -i -e PUB_USER=\"${PUBLISHER_MQTT_USER:-publisher}\" -e PUB_PASS=\"$PUBLISHER_MQTT_PASSWORD\" " +
+  "PUB_USER=$(sed -n 's/^PUBLISHER_MQTT_USER=//p' /opt/freezermon/.env | head -1); PUB_PASS=$(sed -n 's/^PUBLISHER_MQTT_PASSWORD=//p' /opt/freezermon/.env | head -1); " +
+  "exec docker exec -i -e PUB_USER=\"${PUB_USER:-publisher}\" -e PUB_PASS=\"$PUB_PASS\" " +
   "freezermon-mosquitto-1 sh -c 'exec mosquitto_pub -u \"$PUB_USER\" -P \"$PUB_PASS\" -r -t \"$0\" -s' " +
   "'" + topic + "'";
 await $`ssh ${SERVER} ${remote} < ${new Response(cmd + "\n")}`.quiet();

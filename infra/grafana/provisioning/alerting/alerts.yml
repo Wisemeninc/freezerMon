@@ -53,7 +53,7 @@ groups:
           summary: "No telemetry received — unit offline or out of coverage"
         data:
           # per-device staleness: seconds since each unit's last report.
-          # A device that vanishes still has a row (from the 24h lookback), so
+          # A device that vanishes still has a row (from the 30-day lookback), so
           # ONE stale unit in a fleet fires the alert — count()-based checks
           # only catch the whole fleet going silent.
           - refId: A
@@ -63,7 +63,7 @@ groups:
               refId: A
               query: |
                 from(bucket: "telemetry")
-                  |> range(start: -24h)
+                  |> range(start: -30d)
                   |> filter(fn: (r) => r._measurement == "telemetry" and r._field == "t_cab")
                   |> group(columns: ["device"])
                   |> last()

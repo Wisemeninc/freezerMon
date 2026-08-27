@@ -2,7 +2,7 @@
   "title": "FreezerMon \u2014 Mobile Cooling Units",
   "uid": "freezermon-main",
   "schemaVersion": 39,
-  "version": 4,
+  "version": 6,
   "refresh": "1m",
   "time": {
     "from": "now-24h",
@@ -53,7 +53,7 @@
       "targets": [
         {
           "refId": "A",
-          "query": "from(bucket: \"telemetry\")\n |> range(start: -1h)\n |> filter(fn: (r) => r._measurement == \"telemetry\" and r.device == \"${device}\" and r._field == \"t_cab\")\n |> last()"
+          "query": "from(bucket: \"telemetry\")\n |> range(start: -1h)\n |> filter(fn: (r) => r._measurement == \"telemetry\" and r.device =~ /^${device:regex}$/ and r._field == \"t_cab\")\n |> last()"
         }
       ],
       "fieldConfig": {
@@ -107,7 +107,7 @@
       "targets": [
         {
           "refId": "A",
-          "query": "from(bucket: \"telemetry\")\n |> range(start: -1h)\n |> filter(fn: (r) => r._measurement == \"telemetry\" and r.device == \"${device}\" and r._field == \"ext_power\")\n |> last()"
+          "query": "from(bucket: \"telemetry\")\n |> range(start: -1h)\n |> filter(fn: (r) => r._measurement == \"telemetry\" and r.device =~ /^${device:regex}$/ and r._field == \"ext_power\")\n |> last()"
         }
       ],
       "fieldConfig": {
@@ -168,7 +168,7 @@
       "targets": [
         {
           "refId": "A",
-          "query": "from(bucket: \"telemetry\")\n |> range(start: -1h)\n |> filter(fn: (r) => r._measurement == \"telemetry\" and r.device == \"${device}\" and r._field == \"vbat_mv\")\n |> last()"
+          "query": "from(bucket: \"telemetry\")\n |> range(start: -1h)\n |> filter(fn: (r) => r._measurement == \"telemetry\" and r.device =~ /^${device:regex}$/ and r._field == \"vbat_mv\")\n |> last()"
         }
       ],
       "fieldConfig": {
@@ -222,7 +222,7 @@
       "targets": [
         {
           "refId": "A",
-          "query": "from(bucket: \"telemetry\")\n |> range(start: -1h)\n |> filter(fn: (r) => r._measurement == \"telemetry\" and r.device == \"${device}\" and r._field == \"door\")\n |> last()"
+          "query": "from(bucket: \"telemetry\")\n |> range(start: -1h)\n |> filter(fn: (r) => r._measurement == \"telemetry\" and r.device =~ /^${device:regex}$/ and r._field == \"door\")\n |> last()"
         }
       ],
       "fieldConfig": {
@@ -283,7 +283,7 @@
       "targets": [
         {
           "refId": "A",
-          "query": "from(bucket: \"telemetry\")\n |> range(start: -1h)\n |> filter(fn: (r) => r._measurement == \"telemetry\" and r.device == \"${device}\" and r._field == \"rssi_dbm\")\n |> last()"
+          "query": "from(bucket: \"telemetry\")\n |> range(start: -1h)\n |> filter(fn: (r) => r._measurement == \"telemetry\" and r.device =~ /^${device:regex}$/ and r._field == \"rssi_dbm\")\n |> last()"
         }
       ],
       "fieldConfig": {
@@ -337,7 +337,7 @@
       "targets": [
         {
           "refId": "A",
-          "query": "from(bucket: \"telemetry\")\n |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n |> filter(fn: (r) => r._measurement == \"telemetry\" and r.device == \"${device}\")\n |> filter(fn: (r) => r._field == \"t_cab\" or r._field == \"t_amb\")\n |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)"
+          "query": "from(bucket: \"telemetry\")\n |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n |> filter(fn: (r) => r._measurement == \"telemetry\" and r.device =~ /^${device:regex}$/)\n |> filter(fn: (r) => r._field == \"t_cab\" or r._field == \"t_amb\")\n |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)"
         }
       ],
       "fieldConfig": {
@@ -417,7 +417,7 @@
       "targets": [
         {
           "refId": "A",
-          "query": "from(bucket: \"telemetry\")\n |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n |> filter(fn: (r) => r._measurement == \"telemetry\" and r.device == \"${device}\")\n |> filter(fn: (r) => r._field == \"lat\" or r._field == \"lon\")\n |> last()\n |> pivot(rowKey: [\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")"
+          "query": "from(bucket: \"telemetry\")\n |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n |> filter(fn: (r) => r._measurement == \"telemetry\" and r.device =~ /^${device:regex}$/)\n |> filter(fn: (r) => r._field == \"lat\" or r._field == \"lon\")\n |> last()\n |> pivot(rowKey: [\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")"
         }
       ],
       "options": {
@@ -471,7 +471,7 @@
       "targets": [
         {
           "refId": "A",
-          "query": "from(bucket: \"telemetry\")\n |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n |> filter(fn: (r) => r._measurement == \"telemetry\" and r.device == \"${device}\" and r._field == \"door\")\n |> aggregateWindow(every: v.windowPeriod, fn: max, createEmpty: false)"
+          "query": "from(bucket: \"telemetry\")\n |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n |> filter(fn: (r) => r._measurement == \"telemetry\" and r.device =~ /^${device:regex}$/ and r._field == \"door\")\n |> aggregateWindow(every: v.windowPeriod, fn: max, createEmpty: false)"
         }
       ],
       "fieldConfig": {
@@ -526,7 +526,7 @@
       "targets": [
         {
           "refId": "A",
-          "query": "from(bucket: \"telemetry\")\n |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n |> filter(fn: (r) => r._measurement == \"telemetry\" and r.device == \"${device}\" and r._field == \"vbat_mv\")\n |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)"
+          "query": "from(bucket: \"telemetry\")\n |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n |> filter(fn: (r) => r._measurement == \"telemetry\" and r.device =~ /^${device:regex}$/ and r._field == \"vbat_mv\")\n |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)"
         }
       ],
       "fieldConfig": {
@@ -580,7 +580,7 @@
       "targets": [
         {
           "refId": "A",
-          "query": "from(bucket: \"telemetry\")\n |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n |> filter(fn: (r) => r._measurement == \"telemetry\" and r.device == \"${device}\" and r._field == \"rssi_dbm\")\n |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)"
+          "query": "from(bucket: \"telemetry\")\n |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n |> filter(fn: (r) => r._measurement == \"telemetry\" and r.device =~ /^${device:regex}$/ and r._field == \"rssi_dbm\")\n |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)"
         }
       ],
       "fieldConfig": {
@@ -635,7 +635,7 @@
       "targets": [
         {
           "refId": "A",
-          "query": "from(bucket: \"telemetry\")\n |> range(start: -30d)\n |> filter(fn: (r) => (r._measurement == \"telemetry\" or r._measurement == \"alert\") and r.device == \"${device}\")\n |> drop(columns: [\"device\", \"topic\", \"host\"])\n |> pivot(rowKey: [\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n |> group()\n |> sort(columns: [\"_time\"], desc: true)\n |> limit(n: 50)\n |> drop(columns: [\"_start\",\"_stop\",\"result\",\"table\"])"
+          "query": "from(bucket: \"telemetry\")\n |> range(start: -30d)\n |> filter(fn: (r) => (r._measurement == \"telemetry\" or r._measurement == \"alert\") and r.device =~ /^${device:regex}$/)\n |> drop(columns: [\"device\", \"topic\", \"host\"])\n |> pivot(rowKey: [\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n |> group()\n |> sort(columns: [\"_time\"], desc: true)\n |> limit(n: 50)\n |> drop(columns: [\"_start\",\"_stop\",\"result\",\"table\"])"
         }
       ],
       "options": {
@@ -831,6 +831,11 @@
                         "text": "fix",
                         "color": "green",
                         "index": 2
+                      },
+                      "4": {
+                        "text": "unsent",
+                        "color": "orange",
+                        "index": 3
                       }
                     }
                   }
@@ -997,7 +1002,7 @@
             "uid": "influxdb"
           },
           "refId": "A",
-          "query": "from(bucket: \"telemetry\")\n |> range(start: -30d)\n |> filter(fn: (r) => r._measurement == \"telemetry\" and r.device == \"${device}\" and r._field == \"alarm\")\n |> last()"
+          "query": "from(bucket: \"telemetry\")\n |> range(start: -30d)\n |> filter(fn: (r) => r._measurement == \"telemetry\" and r.device =~ /^${device:regex}$/ and r._field == \"alarm\")\n |> last()"
         }
       ]
     },
@@ -1064,7 +1069,7 @@
             "uid": "influxdb"
           },
           "refId": "A",
-          "query": "from(bucket: \"telemetry\")\n |> range(start: -30d)\n |> filter(fn: (r) => r._measurement == \"telemetry\" and r.device == \"${device}\" and r._field == \"moving\")\n |> last()"
+          "query": "from(bucket: \"telemetry\")\n |> range(start: -30d)\n |> filter(fn: (r) => r._measurement == \"telemetry\" and r.device =~ /^${device:regex}$/ and r._field == \"moving\")\n |> last()"
         }
       ]
     },
@@ -1141,7 +1146,7 @@
             "uid": "influxdb"
           },
           "refId": "A",
-          "query": "from(bucket: \"telemetry\")\n |> range(start: -30d)\n |> filter(fn: (r) => r._measurement == \"telemetry\" and r.device == \"${device}\" and r._field == \"wake\")\n |> last()"
+          "query": "from(bucket: \"telemetry\")\n |> range(start: -30d)\n |> filter(fn: (r) => r._measurement == \"telemetry\" and r.device =~ /^${device:regex}$/ and r._field == \"wake\")\n |> last()"
         }
       ]
     },
@@ -1233,7 +1238,7 @@
             "uid": "influxdb"
           },
           "refId": "A",
-          "query": "from(bucket: \"telemetry\")\n |> range(start: -30d)\n |> filter(fn: (r) => r._measurement == \"telemetry\" and r.device == \"${device}\" and r._field == \"rst\")\n |> last()"
+          "query": "from(bucket: \"telemetry\")\n |> range(start: -30d)\n |> filter(fn: (r) => r._measurement == \"telemetry\" and r.device =~ /^${device:regex}$/ and r._field == \"rst\")\n |> last()"
         }
       ]
     },
@@ -1289,7 +1294,7 @@
             "uid": "influxdb"
           },
           "refId": "A",
-          "query": "from(bucket: \"telemetry\")\n |> range(start: -30d)\n |> filter(fn: (r) => r._measurement == \"telemetry\" and r.device == \"${device}\" and r._field == \"fw\")\n |> last()"
+          "query": "from(bucket: \"telemetry\")\n |> range(start: -30d)\n |> filter(fn: (r) => r._measurement == \"telemetry\" and r.device =~ /^${device:regex}$/ and r._field == \"fw\")\n |> last()"
         }
       ]
     },
@@ -1354,7 +1359,7 @@
             "uid": "influxdb"
           },
           "refId": "A",
-          "query": "from(bucket: \"telemetry\")\n |> range(start: -30d)\n |> filter(fn: (r) => r._measurement == \"telemetry\" and r.device == \"${device}\" and r._field == \"hdop\")\n |> last()"
+          "query": "from(bucket: \"telemetry\")\n |> range(start: -30d)\n |> filter(fn: (r) => r._measurement == \"telemetry\" and r.device =~ /^${device:regex}$/ and r._field == \"hdop\")\n |> last()"
         }
       ]
     },
@@ -1597,7 +1602,7 @@
             "uid": "influxdb"
           },
           "refId": "A",
-          "query": "from(bucket: \"telemetry\")\n |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n |> filter(fn: (r) => r._measurement == \"telemetry\" and r.device == \"${device}\" and (r._field == \"alarm\" or r._field == \"moving\" or r._field == \"ext_power\"))\n |> aggregateWindow(every: v.windowPeriod, fn: max, createEmpty: false)\n |> keep(columns: [\"_time\",\"_field\",\"_value\"])"
+          "query": "from(bucket: \"telemetry\")\n |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n |> filter(fn: (r) => r._measurement == \"telemetry\" and r.device =~ /^${device:regex}$/ and (r._field == \"alarm\" or r._field == \"moving\" or r._field == \"ext_power\"))\n |> aggregateWindow(every: v.windowPeriod, fn: max, createEmpty: false)\n |> keep(columns: [\"_time\",\"_field\",\"_value\"])"
         },
         {
           "datasource": {
@@ -1605,7 +1610,7 @@
             "uid": "influxdb"
           },
           "refId": "B",
-          "query": "from(bucket: \"telemetry\")\n |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n |> filter(fn: (r) => r._measurement == \"telemetry\" and r.device == \"${device}\" and (r._field == \"wake\" or r._field == \"rst\"))\n |> aggregateWindow(every: v.windowPeriod, fn: last, createEmpty: false)\n |> keep(columns: [\"_time\",\"_field\",\"_value\"])"
+          "query": "from(bucket: \"telemetry\")\n |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n |> filter(fn: (r) => r._measurement == \"telemetry\" and r.device =~ /^${device:regex}$/ and (r._field == \"wake\" or r._field == \"rst\"))\n |> aggregateWindow(every: v.windowPeriod, fn: last, createEmpty: false)\n |> keep(columns: [\"_time\",\"_field\",\"_value\"])"
         }
       ]
     }

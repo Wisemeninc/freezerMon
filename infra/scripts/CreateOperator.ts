@@ -28,4 +28,11 @@ if (!res.ok) {
   console.error(`Grafana API ${res.status}: ${body.message ?? JSON.stringify(body)}`);
   process.exit(1);
 }
+// Set the role explicitly rather than trusting GF_USERS_AUTO_ASSIGN_ORG_ROLE.
+const role = await fetch(`${base}/api/orgs/1/users/${body.id}`, {
+  method: "PATCH",
+  headers: { "Content-Type": "application/json", Authorization: "Basic " + btoa(`admin:${adminPass}`) },
+  body: JSON.stringify({ role: "Viewer" }),
+});
+if (!role.ok) { console.error(`operator created (id ${body.id}) but role set failed: ${role.status}`); process.exit(1); }
 console.log(`operator user created (id ${body.id}) — role: Viewer (read-only)`);
