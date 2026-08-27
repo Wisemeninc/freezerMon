@@ -37,7 +37,7 @@
 #include "deviceid.h"            // deviceNameValid(), chipSeedName() — host-testable
 #include "geo.h"                 // geoDistM() — movement detection, host-testable
 
-#define FW_VERSION "2.96"   // verNewer() compares dotted INTEGER components: 2.10 > 2.9, and 2.7 < 2.68 — never drop a trailing digit
+#define FW_VERSION "2.97"   // verNewer() compares dotted INTEGER components: 2.10 > 2.9, and 2.7 < 2.68 — never drop a trailing digit
 
 #define SerialMon Serial
 #define SerialAT  Serial1
@@ -210,7 +210,8 @@ static bool verStrictOk(const char *v) {           // ^[0-9]{1,3}\.[0-9]{1,3}$
   return dots == 1 && a > 0 && b > 0;
 }
 static volatile bool mqttEchoSeen = false;      // the broker returned OUR OWN last frame: proof the publish path delivered
-static volatile uint32_t lastPubTs = 0;         // ts of the frame we last published; the echo must carry exactly this
+static volatile uint32_t lastPubSeq = 0;        // sequence of the frame we last published; the echo must carry exactly this
+static uint32_t pubSeq = 0;                     // per-boot counter, first key of every live frame
 static bool pendingFixSent = false;             // publishPendingFix wrote a backfill frame this wake
 static void mqttCallback(char *topic, byte *payload, unsigned int len) {
   // Our own live telemetry frame is published retained; subscribing to that topic makes
@@ -220,13 +221,11 @@ static void mqttCallback(char *topic, byte *payload, unsigned int len) {
   // holder of the shared credential (or a stale retained frame) on the same topic must
   // not count as delivery proof (review 2026-08-27) — match on this cycle's ts.
   if (strstr(topic, "/telemetry")) {
-    if (lastPubTs) {
-      char key[24]; int n = snprintf(key, sizeof(key), "\"ts\":%lu", (unsigned long)lastPubTs);
-      if (n > 0 && len > (unsigned)n) {
-        for (unsigned i = 0; i + n <= len; i++) {
-          if (memcmp(payload + i, key, n) == 0 && (i + n == len || payload[i + n] == ',' || payload[i + n] == '}')) { mqttEchoSeen = true; break; }
-        }
-      }
+    // The frame starts with {"seq":N, — matched at offset 0, so a quoted JSON fragment
+    // inside crash_log (or a same-ts follow-up frame) can never pass as the echo.
+    if (lastPubSeq) {
+      char key[32]; int n = snprintf(key, sizeof(key), "{\"seq\":%lu,", (unsigned long)lastPubSeq);
+      if (n > 0 && len >= (unsigned)n && memcmp(payload, key, n) == 0) mqttEchoSeen = true;
     }
     return;
   }
@@ -458,7 +457,7 @@ static void resolveDeviceId() {
 static bool awakeBudgetLeft() { return (millis() - awakeStart) < MAX_AWAKE_MS; }
 
 // Supply-sag instrumentation (2.88). Every brownout dies at ph=1 — the modem power-on
-// and boot. Sampling the battery ADC at ~500 Hz through those steps on the cycles
+// and boot. Sampling the battery ADC (~10 kHz for 60 ms after each edge, then 500 Hz) on the cycles
 // that SURVIVE gives the depth and timing of the sag, hence the path resistance
 // (R ≈ (rest − min) / I_pulse): the number that decides cell vs holder vs supercap.
 RTC_DATA_ATTR uint16_t sagRestMv = 0, sagMinMv = 0, sagAtMs = 0, sagDeepN = 0; RTC_DATA_ATTR uint8_t sagStep = 0;
@@ -1734,6 +1733,7 @@ static bool publishSample(const Sample &s, uint32_t nowEpoch, bool buffered,
                           const char *wakeReason, int16_t rssiDbm) {
   JsonDocument doc;
   uint32_t ts = nowEpoch > s.ageS ? nowEpoch - s.ageS : 0;
+  if (!buffered) { doc["seq"] = ++pubSeq; lastPubSeq = pubSeq; }   // FIRST key: the broker echo is matched on it
   if (ts) doc["ts"] = ts;               // omitted only if clock never synced since first power-on
   if (!isnan(s.tCab)) doc["t_cab"] = serialized(String(s.tCab, 2));
   if (!isnan(s.tAmb)) doc["t_amb"] = serialized(String(s.tAmb, 2));
@@ -1753,17 +1753,6 @@ static bool publishSample(const Sample &s, uint32_t nowEpoch, bool buffered,
     doc["lon"] = lastLon;
     doc["hdop"] = serialized(String(lastFixHdop, 1));
     doc["sats"] = lastFixSats;
-  }
-  if (g_resetStr && strcmp(g_resetStr, "deepsleep") != 0) {   // reset forensics on every non-sleep boot
-    doc["rr0"] = (int)rtc_get_reset_reason(0);            // ROM-level per-core reset reasons (rom/rtc.h)
-    doc["rr1"] = (int)rtc_get_reset_reason(1);
-    if (crashSnapshot.length()) {                          // published once, budgeted to what the frame can still carry
-      size_t used = measureJson(doc) + 24;                                   // 24 = key + quotes + margin
-      size_t room = used < PAYLOAD_MAX - 1 ? PAYLOAD_MAX - 1 - used : 0;
-      String cl = crashSnapshot; if (cl.length() > room) cl = cl.substring(0, room > 0 ? room : 0);
-      if (cl.length()) doc["crash_log"] = cl;
-      crashSnapshot = ""; crashMagic = 0;
-    }
   }
   if (gpsLastStatus) {                                   // outcome of the most recent hunt (see gpsLastStatus)
     doc["gps_last"]      = gpsLastStatus;
@@ -1790,6 +1779,17 @@ static bool publishSample(const Sample &s, uint32_t nowEpoch, bool buffered,
     doc["vbat_sag_n"]   = sagDeepN;   // samples >300 mV below rest (needle vs sustained sag)
   }
   doc["fw"]        = FW_VERSION;      // fleet version tracking + OTA confirmation
+  if (g_resetStr && strcmp(g_resetStr, "deepsleep") != 0) {   // reset forensics on every non-sleep boot (LAST: crash_log is budgeted against the full frame)
+    doc["rr0"] = (int)rtc_get_reset_reason(0);            // ROM-level per-core reset reasons (rom/rtc.h)
+    doc["rr1"] = (int)rtc_get_reset_reason(1);
+    if (crashSnapshot.length()) {                          // published once, budgeted to what the frame can still carry
+      size_t used = measureJson(doc) + 24;                                   // 24 = key + quotes + margin
+      size_t room = used < PAYLOAD_MAX - 1 ? PAYLOAD_MAX - 1 - used : 0;
+      String cl = crashSnapshot; if (cl.length() > room) cl = cl.substring(0, room > 0 ? room : 0);
+      if (cl.length()) doc["crash_log"] = cl;
+      crashSnapshot = ""; crashMagic = 0;
+    }
+  }
 
   // 768: serializeJson TRUNCATES SILENTLY at the buffer size and returns bytes
   // written — with the 2.7x diagnostic fields a coordinate-carrying frame passed
@@ -1797,7 +1797,6 @@ static bool publishSample(const Sample &s, uint32_t nowEpoch, bool buffered,
   // parse ... bo_streak:"), which is where ALL of tonight's "lost fixes" actually
   // died. The dead-socket theories (2.78/2.82/2.84) were chasing this. The guard
   // below makes the failure loud if the frame ever outgrows the buffer again.
-  if (!buffered && ts) lastPubTs = ts;          // the echo check matches this exact ts
   char topic[64], payload[PAYLOAD_MAX];         // largest frame (all breadcrumbs + budgeted crash_log) is ~820 B; keep headroom
   snprintf(topic, sizeof(topic), "freezer/%s/telemetry", deviceId);
   size_t n = serializeJson(doc, payload, sizeof(payload));
@@ -1982,7 +1981,7 @@ void setup() {
       if (now) rtcEpoch = now;          // sync the RTC estimate
       else     now = rtcEpoch;          // clock query failed -> use aged estimate
 
-      mqtt.setBufferSize(1400);      // >= topic + headers + payload[1152]   // must exceed topic + largest frame (payload[768])
+      mqtt.setBufferSize(1400);      // >= topic + headers + PAYLOAD_MAX
       mqtt.setSocketTimeout(15);
       mqtt.setKeepAlive(180);      // OTA downloads run minutes with no mqtt.loop() — don't let the broker drop us mid-flash
       mqtt.setCallback(mqttCallback);
@@ -2344,7 +2343,7 @@ void loop() {
   if (coldChargeCheck(s))        publishAlert(s, now, "cold_charge");
   prevAlarm = s.alarm;
   lastDoor = door;
-  lastReportMs = millis();
+  if (ok) lastReportMs = millis();                      // "last REPORT", not last cycle — the liveness guard keys off it
 
   if (!ok) {                                            // link lost -> recover via sleep cycle
     bufferSample(s);
