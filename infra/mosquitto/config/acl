@@ -8,6 +8,8 @@
 pattern write freezer/%u/telemetry
 pattern write freezer/%u/alert
 pattern read  freezer/%u/cmd
+# the device subscribes to its OWN retained frame as delivery proof (broker echo)
+pattern read  freezer/%u/telemetry
 
 # --- Legacy shared device credential (MQTT_USER in config.h) ---------------------
 # Kept for fleets still on one compiled-in credential. It can publish telemetry
@@ -17,6 +19,8 @@ user freezer
 topic write freezer/+/telemetry
 topic write freezer/+/alert
 topic read  freezer/+/cmd
+# echo subscription (delivery proof); fleet-wide only until per-device users exist
+topic read  freezer/+/telemetry
 
 # --- Ingest (Telegraf): read-only ------------------------------------------------
 user telegraf
