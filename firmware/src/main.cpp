@@ -37,7 +37,7 @@
 #include "deviceid.h"            // deviceNameValid(), chipSeedName() — host-testable
 #include "geo.h"                 // geoDistM() — movement detection, host-testable
 
-#define FW_VERSION "2.91"   // verNewer() compares dotted INTEGER components: 2.10 > 2.9, and 2.7 < 2.68 — never drop a trailing digit
+#define FW_VERSION "2.92"   // verNewer() compares dotted INTEGER components: 2.10 > 2.9, and 2.7 < 2.68 — never drop a trailing digit
 
 #define SerialMon Serial
 #define SerialAT  Serial1
@@ -2166,6 +2166,19 @@ void setup() {
 }
 
 // Runs only in powered mode; battery cycles never reach it (deep sleep ends them).
+// Fresh MQTT session for the powered regime (the modem/PDP stay up). Returns connected.
+static bool poweredReconnect() {
+  netClient.stop();
+  if (!modem.isGprsConnected()) modem.gprsConnect(APN, GPRS_USER, GPRS_PASS);
+  char clientId[48]; snprintf(clientId, sizeof(clientId), "freezermon-%s", deviceId);
+  mqtt.setServer(MQTT_HOST, MQTT_PORT);
+  if (!mqtt.connect(clientId, MQTT_USER, MQTT_PASS)) { delay(1500); if (!mqtt.connect(clientId, MQTT_USER, MQTT_PASS)) { logLine("[mqtt] powered reconnect failed rc=%d", mqtt.state()); return false; } }
+  char t[64];
+  snprintf(t, sizeof(t), "freezer/%s/cmd", deviceId); mqtt.subscribe(t);
+  snprintf(t, sizeof(t), "freezer/%s/telemetry", deviceId); mqtt.subscribe(t);   // echo (delivery proof)
+  logLine("[mqtt] powered session re-established");
+  return true;
+}
 static uint32_t updateRunningSinceMs = 0;
 void loop() {
   if (!poweredSession) goToSleep(REPORT_INTERVAL_S);    // safety net
@@ -2228,18 +2241,7 @@ void loop() {
   evaluateAlarm(s);
   lastSample = s; lastSampleValid = true;               // /status reads this copy
   gpsFreshThisWake = false;                             // powered loop never reboots — freshness is per report cycle
-  // Powered-regime parity (2.90): sync the clock BEFORE the hunt so a fix persisted by
-  // maybeGps carries this cycle's epoch (rtcEpoch is never aged in loop(), so it was
-  // the last sync time — a stale timestamp on any backfill). The fix then rides this
-  // cycle's frame; the broker echo below proves delivery and clears the NVS copy.
-  { uint32_t e = networkEpoch(); if (e) rtcEpoch = e; }
   mqttEchoSeen = false; pendingFixSent = false;
-  maybeGps(GPS_FIX_TIMEOUT_S);
-  if (moveAlertPending && mqtt.connected()) {           // movement detected by that fix
-    publishAlert(s, rtcEpoch, "moving");
-    moveAlertPending = 0;
-    saveMonState();
-  }
   // GNSS-wedge recovery (powered regime only — battery self-heals via the
   // deep-sleep rail drop). A continuously-powered modem never loses the rail,
   // so when the watchdog reports the engine stuck, force a full power cycle
@@ -2270,13 +2272,38 @@ void loop() {
   int csq = modem.getSignalQuality();
   int16_t rssiDbm = (csq >= 0 && csq < 99) ? (int16_t)(-113 + 2 * csq) : -999;
 
+  // Publish FIRST, GNSS LAST — same order as the battery path, for the same reason: the
+  // A76XX GNSS engine shares the RF path and routinely drops the CCH session under the
+  // MQTT client. 2.90/2.91 hunted before publishing on the held session; the first
+  // powered report of the very first powered session failed exactly that way
+  // (11:21Z 2026-08-27) and the unit fell back to sleep cycles every 3 minutes.
+  if (!mqtt.connected()) poweredReconnect();            // session may have died since the last cycle
   bool ok = mqtt.connected() &&
             publishSample(s, now, false, doorChanged ? "door" : "powered", rssiDbm);
+  if (!ok && poweredReconnect())                        // one retry on a fresh session before giving up the regime
+    ok = publishSample(s, now, false, doorChanged ? "door" : "powered", rssiDbm);
   if (ok) {                                             // delivery proof: our retained frame comes back on the echo subscription
     uint32_t tEcho = millis();
     while (millis() - tEcho < 3000UL && !mqttEchoSeen) { mqtt.loop(); delay(20); }
     if (mqttEchoSeen) clearPendingFix();                // the fix in that frame is in the broker — nothing to backfill
     else logLine("[mqtt] no echo of the powered frame - fix kept for backfill");
+  }
+  if (ok) {                                             // GNSS on the now-idle session; reconnect afterwards if it took the session down
+    bool gotFix = maybeGps(GPS_FIX_TIMEOUT_S);
+    if (!mqtt.connected()) poweredReconnect();
+    if (gotFix && mqtt.connected()) {                   // same-ts follow-up carries the coordinates (upsert in InfluxDB)
+      mqttEchoSeen = false;
+      if (publishSample(s, now, false, doorChanged ? "door" : "powered", rssiDbm)) {
+        uint32_t tEcho = millis();
+        while (millis() - tEcho < 3000UL && !mqttEchoSeen) { mqtt.loop(); delay(20); }
+        if (mqttEchoSeen) clearPendingFix();
+      }
+    }
+    if (moveAlertPending && mqtt.connected()) {         // movement detected by that fix
+      publishAlert(s, now, "moving");
+      moveAlertPending = 0;
+      saveMonState();
+    }
   }
   if (doorChanged && s.doorOpen) publishAlert(s, now, "door_open");
   if (tempAlertPending) { publishAlert(s, now, "temp_breach"); tempAlertPending = 0; saveMonState(); }
