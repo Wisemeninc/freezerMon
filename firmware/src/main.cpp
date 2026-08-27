@@ -37,7 +37,7 @@
 #include "deviceid.h"            // deviceNameValid(), chipSeedName() — host-testable
 #include "geo.h"                 // geoDistM() — movement detection, host-testable
 
-#define FW_VERSION "2.92"   // verNewer() compares dotted INTEGER components: 2.10 > 2.9, and 2.7 < 2.68 — never drop a trailing digit
+#define FW_VERSION "2.93"   // verNewer() compares dotted INTEGER components: 2.10 > 2.9, and 2.7 < 2.68 — never drop a trailing digit
 
 #define SerialMon Serial
 #define SerialAT  Serial1
@@ -2180,6 +2180,7 @@ static bool poweredReconnect() {
   return true;
 }
 static uint32_t updateRunningSinceMs = 0;
+static uint8_t  noEchoCycles = 0;                       // powered reports the broker never echoed back
 void loop() {
   if (!poweredSession) goToSleep(REPORT_INTERVAL_S);    // safety net
 
@@ -2285,8 +2286,16 @@ void loop() {
   if (ok) {                                             // delivery proof: our retained frame comes back on the echo subscription
     uint32_t tEcho = millis();
     while (millis() - tEcho < 3000UL && !mqttEchoSeen) { mqtt.loop(); delay(20); }
-    if (mqttEchoSeen) clearPendingFix();                // the fix in that frame is in the broker — nothing to backfill
-    else logLine("[mqtt] no echo of the powered frame - fix kept for backfill");
+    if (mqttEchoSeen) { clearPendingFix(); noEchoCycles = 0; }   // the fix in that frame is in the broker — nothing to backfill
+    else {
+      // "Connected" but nothing comes back: publish() returned true into a socket the
+      // broker is not servicing (the 2026-08-26 truncation/dead-CCH pattern). Escalate:
+      // fresh session after 2 silent cycles, full sleep/power cycle after 3.
+      if (noEchoCycles < 255) noEchoCycles++;
+      logLine("[mqtt] no echo of the powered frame (%u in a row) - fix kept for backfill", noEchoCycles);
+      if (noEchoCycles >= 3) { bufferSample(s); goToSleep(REPORT_INTERVAL_FAST_S); }
+      if (noEchoCycles >= 2) poweredReconnect();
+    }
   }
   if (ok) {                                             // GNSS on the now-idle session; reconnect afterwards if it took the session down
     bool gotFix = maybeGps(GPS_FIX_TIMEOUT_S);
