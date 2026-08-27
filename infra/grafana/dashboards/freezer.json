@@ -2,7 +2,7 @@
   "title": "FreezerMon \u2014 Mobile Cooling Units",
   "uid": "freezermon-main",
   "schemaVersion": 39,
-  "version": 9,
+  "version": 10,
   "refresh": "1m",
   "time": {
     "from": "now-24h",
@@ -434,10 +434,13 @@
       ],
       "options": {
         "view": {
-          "id": "coords",
+          "id": "fit",
+          "allLayers": true,
+          "lastOnly": false,
+          "padding": 12,
+          "zoom": 16,
           "lat": 55.99131,
-          "lon": 9.957806,
-          "zoom": 12
+          "lon": 9.957806
         },
         "basemap": {
           "type": "osm-standard",

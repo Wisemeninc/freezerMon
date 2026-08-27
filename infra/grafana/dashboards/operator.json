@@ -14,7 +14,7 @@
     "to": "now"
   },
   "schemaVersion": 39,
-  "version": 2,
+  "version": 3,
   "templating": {
     "list": [
       {
@@ -46,7 +46,7 @@
       "gridPos": {
         "x": 0,
         "y": 0,
-        "w": 6,
+        "w": 5,
         "h": 6
       },
       "datasource": {
@@ -114,9 +114,9 @@
       "title": "Cabinet temperature",
       "description": "Inside the cabinet. Limit 8 \u00b0C.",
       "gridPos": {
-        "x": 6,
+        "x": 5,
         "y": 0,
-        "w": 6,
+        "w": 5,
         "h": 6
       },
       "datasource": {
@@ -178,9 +178,9 @@
       "title": "Door",
       "description": "Door reed switch.",
       "gridPos": {
-        "x": 12,
+        "x": 14,
         "y": 0,
-        "w": 4,
+        "w": 3,
         "h": 6
       },
       "datasource": {
@@ -248,7 +248,7 @@
       "title": "Connection",
       "description": "ONLINE = a report in the last 15 minutes. LATE = 15\u201360 min. OFFLINE = over an hour \u2014 the unit may be out of coverage, out of battery, or switched off.",
       "gridPos": {
-        "x": 16,
+        "x": 17,
         "y": 0,
         "w": 4,
         "h": 6
@@ -339,9 +339,9 @@
       "title": "Last contact",
       "description": "When the unit last reported.",
       "gridPos": {
-        "x": 20,
+        "x": 21,
         "y": 0,
-        "w": 4,
+        "w": 3,
         "h": 6
       },
       "datasource": {
@@ -594,7 +594,7 @@
     {
       "id": 9,
       "type": "timeseries",
-      "title": "Cabinet temperature \u2014 last 24 hours",
+      "title": "Temperature \u2014 last 24 hours",
       "gridPos": {
         "x": 0,
         "y": 11,
@@ -634,14 +634,60 @@
                 "value": 8
               }
             ]
-          },
-          "displayName": "Cabinet"
+          }
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Outside"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#9ca3af"
+                }
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    6,
+                    4
+                  ]
+                }
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 0
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Cabinet"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#3b82f6"
+                }
+              }
+            ]
+          }
+        ]
       },
       "options": {
         "legend": {
-          "displayMode": "hidden"
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
         },
         "tooltip": {
           "mode": "single"
@@ -653,8 +699,16 @@
             "type": "influxdb",
             "uid": "influxdb"
           },
-          "refId": "A",
-          "query": "from(bucket: \"telemetry\")\n |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n |> filter(fn: (r) => r._measurement == \"telemetry\" and r.device =~ /^${device:regex}$/ and r._field == \"t_cab\")\n |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n |> keep(columns: [\"_time\",\"_value\"])"
+          "refId": "Cabinet",
+          "query": "from(bucket: \"telemetry\")\n |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n |> filter(fn: (r) => r._measurement == \"telemetry\" and r.device =~ /^${device:regex}$/ and r._field == \"t_cab\")\n |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n |> keep(columns: [\"_time\",\"_value\"])\n |> rename(columns: {_value: \"Cabinet\"})"
+        },
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influxdb"
+          },
+          "refId": "Outside",
+          "query": "from(bucket: \"telemetry\")\n |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n |> filter(fn: (r) => r._measurement == \"telemetry\" and r.device =~ /^${device:regex}$/ and r._field == \"t_amb\")\n |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n |> keep(columns: [\"_time\",\"_value\"])\n |> rename(columns: {_value: \"Outside\"})"
         }
       ]
     },
@@ -676,9 +730,12 @@
       "options": {
         "view": {
           "id": "fit",
+          "allLayers": true,
+          "lastOnly": false,
+          "padding": 12,
+          "zoom": 16,
           "lat": 55.99,
-          "lon": 9.958,
-          "zoom": 12
+          "lon": 9.958
         },
         "basemap": {
           "type": "osm-standard",
@@ -897,6 +954,61 @@
           },
           "refId": "A",
           "query": "from(bucket: \"telemetry\")\n |> range(start: -24h)\n |> filter(fn: (r) => r._measurement == \"alert\" and r.device =~ /^${device:regex}$/)\n |> drop(columns: [\"device\", \"topic\"])\n |> pivot(rowKey: [\"_time\", \"kind\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n |> group()\n |> sort(columns: [\"_time\"], desc: true)\n |> limit(n: 50)\n |> keep(columns: [\"_time\", \"kind\", \"t_cab\", \"vbat_mv\"])"
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "type": "stat",
+      "title": "Outside temperature",
+      "description": "The second probe (ambient / outside the cabinet).",
+      "gridPos": {
+        "x": 10,
+        "y": 0,
+        "w": 4,
+        "h": 6
+      },
+      "datasource": {
+        "type": "influxdb",
+        "uid": "influxdb"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "celsius",
+          "decimals": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "none",
+        "graphMode": "none",
+        "textMode": "value",
+        "justifyMode": "center",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influxdb"
+          },
+          "refId": "A",
+          "query": "from(bucket: \"telemetry\")\n |> range(start: -30d)\n |> filter(fn: (r) => r._measurement == \"telemetry\" and r.device =~ /^${device:regex}$/ and r._field == \"t_amb\")\n |> last()\n |> keep(columns: [\"_value\"])"
         }
       ]
     }
