@@ -17,6 +17,9 @@ groups:
         annotations:
           summary: 'Cabinet {{ printf "%.1f" $values.B.Value }} °C — limit 8 °C ({{ $labels.device }})'
         data:
+          # keep() trims the frame to a wide numeric series (_time,_value + the device label);
+          # Grafana's expression engine rejects Flux tables with string columns ("got type long").
+          # NB: never put a # comment INSIDE the query block — it becomes part of the Flux text.
           - refId: A
             relativeTimeRange: { from: 1800, to: 0 }
             datasourceUid: influxdb
@@ -28,7 +31,7 @@ groups:
                   |> filter(fn: (r) => r._measurement == "telemetry" and r._field == "t_cab")
                   |> group(columns: ["device"])
                   |> last()
-                  |> keep(columns: ["_time", "_value", "device"])   # wide numeric series: Grafana's expression engine rejects string columns ("got type long")
+                  |> keep(columns: ["_time", "_value", "device"])
           - refId: B
             relativeTimeRange: { from: 0, to: 0 }
             datasourceUid: __expr__
