@@ -1,5 +1,12 @@
 # freezerMon provisioned alert rules (Grafana unified alerting, apiVersion 1).
 # Contact point + policy: contactpoints.yml (Signal via infra/alert-relay).
+#
+# Every rule carries a `last_report_age_s` annotation — seconds since the unit's newest
+# reading, re-rendered on every evaluation. The relay drops any message (alarm, reminder,
+# "OK again") whose age exceeds MUTE_AFTER_SILENT_S (default one day): a unit that has
+# been silent that long was already reported offline once, and nagging about a reading
+# nobody can act on is noise. Grafana's own state is untouched — the rule stays firing in
+# the UI, and a fresh reading clears it the normal way.
 apiVersion: 1
 
 groups:
@@ -16,6 +23,7 @@ groups:
         execErrState: OK
         annotations:
           summary: 'Cabinet {{ printf "%.1f" $values.B.Value }} °C — limit 8 °C ({{ $labels.device }}){{ with $values.E }}{{ if gt .Value 900.0 }} · last reading {{ humanizeDuration .Value }} ago, unit silent{{ end }}{{ end }}'
+          last_report_age_s: '{{ with $values.E }}{{ printf "%.0f" .Value }}{{ end }}'
         data:
           # The rule judges the LAST KNOWN reading (30-day lookback, like the offline rule), not
           # "a reading in the last 30 min": a unit that goes silent while hot must stay in alarm
@@ -76,6 +84,7 @@ groups:
         execErrState: Error
         annotations:
           summary: 'Last report {{ printf "%.0f" $values.B.Value }} s ago — unit offline, out of coverage, or out of battery ({{ $labels.device }})'
+          last_report_age_s: '{{ with $values.B }}{{ printf "%.0f" .Value }}{{ end }}'
         data:
           # per-device staleness: seconds since each unit's last report.
           # A device that vanishes still has a row (from the 30-day lookback), so
@@ -116,6 +125,7 @@ groups:
         execErrState: OK
         annotations:
           summary: 'The unit''s last reports carried no cabinet temperature for 15+ min — probe unplugged or failed ({{ $labels.device }})'
+          last_report_age_s: '{{ with $values.E }}{{ printf "%.0f" .Value }}{{ end }}'
         data:
           # 1 when the unit's newest frame is more than 15 min newer than its newest t_cab
           # (or it never sent one). Compares last-seen timestamps instead of counting frames in
@@ -150,6 +160,23 @@ groups:
               expression: B
               conditions:
                 - evaluator: { type: gt, params: [0.5] }
+          - refId: D
+            relativeTimeRange: { from: 2592000, to: 0 }
+            datasourceUid: influxdb
+            model:
+              refId: D
+              query: |
+                from(bucket: "telemetry")
+                  |> range(start: -30d)
+                  |> filter(fn: (r) => r._measurement == "telemetry" and r._field == "fw")
+                  |> group(columns: ["device"])
+                  |> last()
+                  |> map(fn: (r) => ({ r with _value: float(v: int(v: now()) - int(v: r._time)) / 1000000000.0 }))
+                  |> keep(columns: ["_time", "_value", "device"])
+          - refId: E
+            relativeTimeRange: { from: 0, to: 0 }
+            datasourceUid: __expr__
+            model: { refId: E, type: reduce, expression: D, reducer: last }
       - uid: fm-batt-low
         title: Battery low
         condition: C
@@ -158,6 +185,7 @@ groups:
         execErrState: OK
         annotations:
           summary: 'Battery {{ printf "%.0f" $values.B.Value }} mV — below 3400 mV, recharge or connect power ({{ $labels.device }}){{ with $values.E }}{{ if gt .Value 900.0 }} · last reading {{ humanizeDuration .Value }} ago, unit silent{{ end }}{{ end }}'
+          last_report_age_s: '{{ with $values.E }}{{ printf "%.0f" .Value }}{{ end }}'
         data:
           # Last known battery voltage (30-day lookback) — a unit that dies of a flat cell must
           # not get an "OK again" when its frames stop. D/E = age of the reading (see temp rule).

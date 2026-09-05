@@ -83,6 +83,7 @@ services:
       SIGNAL_URL: http://signal:8080
       SIGNAL_NUMBER: ${SIGNAL_NUMBER:?set in .env}
       SIGNAL_RECIPIENTS: ${SIGNAL_RECIPIENTS:?set in .env}
+      MUTE_AFTER_SILENT_S: ${MUTE_AFTER_SILENT_S:-86400}   # no messages about a unit silent longer than this (0 = never mute)
 
 volumes:
   signal-data:

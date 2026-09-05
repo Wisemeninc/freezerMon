@@ -127,6 +127,8 @@ cd infra && set -a && source .env && set +a && bun scripts/CreateOperator.ts
 ## Alerting
 
 Four rules are provisioned: cabinet temp above 8 °C for 10 min (cooler food-safety ceiling — set it *above* your unit's normal band and keep it in sync with `TEMP_ALARM_C` in `config.h`, or the alarm never clears and the fast reporting cadence drains the battery ~5×; a freezer would use e.g. −12), no data for 15 min (offline/out of coverage), battery under 3.4 V, and cabinet probe missing (the unit reports but carries no `t_cab` for 15 min). The temperature, battery and probe rules judge the unit's **last known reading** (30-day lookback), not "a reading in the last N minutes": a unit that goes silent while in alarm stays in alarm — the reminder then says how old the reading is — and only a fresh reading on the right side of the limit produces the "OK again". Silence itself is reported once by the offline rule.
+
+A unit that has been silent for **more than a day** gets no further messages at all — no 4-hourly reminders, no "OK again" — until it reports again (the offline message at 15 min already told you it went quiet). The relay does the muting from a `last_report_age_s` annotation every rule carries, so Grafana's own alert state is untouched. Tune or disable with `MUTE_AFTER_SILENT_S` in `.env` (seconds, default 86400, `0` = never mute); the relay logs every muted message.
 **Delivery is Signal**, no phone-number registration needed: the stack ships `signal-cli-rest-api` plus a tiny relay, and Grafana's provisioned contact point posts to the relay. One-time setup:
 
 ```bash
